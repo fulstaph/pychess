@@ -1,0 +1,16 @@
+# Chess Engine - Dependencies
+# This is a pure Python implementation with no external dependencies
+
+# Python 3.8+ standard library modules used:
+- enum (standard library)
+- typing (standard library)
+- dataclasses (standard library, Python 3.7+)
+
+# Development dependencies (optional):
+# pytest>=7.0  - Testing framework
+# mypy>=1.0   - Type checking
+# black>=23.0 - Code formatting
+# ruff>=0.0.241 - Linting
+
+# Note: This chess engine is designed to be dependency-free!
+# It only uses Python's standard library modules.
