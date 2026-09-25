@@ -1,54 +1,104 @@
-"""
-Chess Engine in Python with Strict Typing
+"""Chess engine with immutable boards, legal moves, and a terminal player."""
 
-A simple, type-safe chess engine implementation in Python.
-Designed for clarity and educational purposes.
+from typing import TYPE_CHECKING
 
-Usage:
-    from chess import ChessGame, Board, Piece
-    
-    # Create a new game
-    game = ChessGame()
-    
-    # Make a move
-    move = "e2e4"
-    game.make_move(move)
-    
-    # Check game status
-    print(game.is_check())
-    print(game.is_checkmate())
-    
-    # View the board
-    chess.print_board(game.get_board())
-
-Modules:
-    piece.py - Piece definitions and board representation
-    move.py - Move generation, validation, and notation
-    game.py - Game engine with check, checkmate, stalemate detection
-
-Chess Concepts:
-    1. Piece Types - 6 types with unique movement rules
-    2. Board Representation - 8x8 grid using 2D array
-    3. Movement - Each piece type has specific valid moves
-    4. Castling - Special move for King (O-O, O-O-O)
-    5. En Passant - Special pawn capture
-    6. Promotion - Pawn reaches end of board
-    7. Check - King under attack
-    8. Checkmate - King in check with no legal moves
-    9. Stalemate - No legal moves, but not in check
-"""
-
-from .piece import Piece, PieceType, Board, Square
-from .move import Move, GameResult, file_letter, rank_letter
-from .game import ChessGame, GameStatus, print_board
+from .game import ChessGame, GameStatus, from_fen, print_board, to_fen
 from .helpers import PlayerColor, notation_to_coords, square_notation
+from .move import Move
+from .piece import Board, Color, Piece, PieceType, Square
+
+if TYPE_CHECKING:
+    from .stockfish import (
+        MatchResult,
+        SeriesResult,
+        Stockfish,
+        find_stockfish,
+        format_series_summary,
+        play_match,
+        run_series,
+    )
+    from .tui import (
+        format_pgn,
+        get_captured_pieces,
+        render_dashboard,
+    )
+    from .uci import (
+        UCIEngine,
+        UCIEngineError,
+        run_uci_server,
+        to_uci,
+    )
+    from .web import (
+        run_web_server,
+    )
 
 __all__ = [
-    'Piece', 'PieceType', 'Color', 'Board', 'Square',
-    'Move', 'GameResult', 'file_letter', 'rank_letter',
-    'ChessGame', 'GameStatus', 'PlayerColor', 'print_board',
-    'notation_to_coords', 'square_notation'
+    "Board",
+    "ChessGame",
+    "Color",
+    "GameStatus",
+    "MatchResult",
+    "Move",
+    "Piece",
+    "PieceType",
+    "PlayerColor",
+    "SeriesResult",
+    "Square",
+    "Stockfish",
+    "UCIEngine",
+    "UCIEngineError",
+    "find_stockfish",
+    "format_pgn",
+    "format_series_summary",
+    "from_fen",
+    "get_captured_pieces",
+    "notation_to_coords",
+    "play_match",
+    "print_board",
+    "render_dashboard",
+    "run_series",
+    "run_uci_server",
+    "run_web_server",
+    "square_notation",
+    "to_fen",
+    "to_uci",
 ]
 
-__version__ = '0.1.0'
-__author__ = 'Chess Engine Dev'
+__version__ = "0.1.0"
+
+
+def __getattr__(name: str) -> object:
+    if name in (
+        "MatchResult",
+        "SeriesResult",
+        "Stockfish",
+        "find_stockfish",
+        "format_series_summary",
+        "play_match",
+        "run_series",
+    ):
+        from . import stockfish
+
+        return getattr(stockfish, name)
+    if name in (
+        "UCIEngine",
+        "UCIEngineError",
+        "run_uci_server",
+        "to_uci",
+    ):
+        from . import uci
+
+        return getattr(uci, name)
+    if name in (
+        "format_pgn",
+        "get_captured_pieces",
+        "render_dashboard",
+    ):
+        from . import tui
+
+        return getattr(tui, name)
+    if name == "run_web_server":
+        from . import web
+
+        return getattr(web, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

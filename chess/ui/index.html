@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pychess - Web UI</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@lichess-org/chessground/assets/chessground.base.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@lichess-org/chessground/assets/chessground.brown.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@lichess-org/chessground/assets/chessground.cburnett.css">
+  <style>
+/* __INJECT_CSS__ */
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">pychess <span class="badge">Web UI</span></div>
+    <div id="connection-status" class="badge">Connected</div>
+  </header>
+
+  <main>
+    <div class="board-container">
+      <div id="board-wrap">
+        <div id="cg-board"></div>
+        <div id="promo-modal">
+          <div class="promo-choices">
+            <div class="promo-btn" data-piece="q">♛</div>
+            <div class="promo-btn" data-piece="r">♜</div>
+            <div class="promo-btn" data-piece="b">♝</div>
+            <div class="promo-btn" data-piece="n">♞</div>
+          </div>
+        </div>
+      </div>
+      <div id="eval-bar"><div id="eval-fill"></div></div>
+    </div>
+
+    <div class="sidebar">
+      <div class="panel-section">
+        <h3>Match Status</h3>
+        <div id="status-card" class="status-banner">
+          <span id="turn-text">White to move</span>
+          <span id="state-text">Active</span>
+        </div>
+        <div class="captures-row">
+          <div>W captures: <span id="cap-w" class="cap-list"></span></div>
+          <div>B captures: <span id="cap-b" class="cap-list"></span></div>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <h3>Opponent</h3>
+        <select id="ai-mode">
+          <option value="minimax-2">Minimax AI (Depth 2)</option>
+          <option value="minimax-1">Minimax AI (Depth 1)</option>
+          <option value="stockfish">Stockfish Engine</option>
+          <option value="human">Pass & Play (Two-Player)</option>
+        </select>
+      </div>
+
+      <div class="panel-section">
+        <h3>Move History</h3>
+        <div id="moves-history" class="moves-box"></div>
+      </div>
+
+      <div class="panel-section btn-row">
+        <button id="btn-undo">Undo</button>
+        <button id="btn-flip">Flip Board</button>
+        <button id="btn-ai" class="primary">AI Move</button>
+        <button id="btn-new">New Game</button>
+      </div>
+
+      <div class="panel-section">
+        <h3>Position FEN</h3>
+        <input type="text" id="fen-input" placeholder="Paste FEN to load position...">
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+// __INJECT_JS__
+  </script>
+</body>
+</html>
