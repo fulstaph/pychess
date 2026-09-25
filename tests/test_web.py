@@ -1,14 +1,9 @@
-"""Tests for local Web UI server and REST API endpoints."""
+"""Tests for the FastAPI Web UI and REST API endpoints."""
 
-import json
-import threading
-import urllib.error
-import urllib.request
-
-import pytest
+from fastapi.testclient import TestClient
 
 from chess import ChessGame
-from chess.web import create_web_server, serialize_game_state
+from chess.web import create_app, serialize_game_state
 
 
 def test_serialize_game_state_structure():
@@ -25,142 +20,109 @@ def test_serialize_game_state_structure():
     assert data["captured_b"] == []
 
 
-def test_web_server_endpoints():
-    server = create_web_server(host="127.0.0.1", port=0)
-    host, port = server.server_address
-    base_url = f"http://{host}:{port}"
+def test_web_endpoints_full_flow():
+    client = TestClient(create_app())
 
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
+    # GET / (HTML UI page)
+    res_root = client.get("/")
+    assert res_root.status_code == 200
+    html = res_root.text
+    assert "Chessground" in html
+    assert "pychess" in html
+    assert '<div id="cg-board">' in html
 
-    try:
-        # GET / (HTML UI page)
-        req_root = urllib.request.urlopen(f"{base_url}/", timeout=5)
-        assert req_root.status == 200
-        html = req_root.read().decode("utf-8")
-        assert "Chessground" in html
-        assert "pychess" in html
-        assert '<div id="cg-board">' in html
+    # GET /api/state
+    state = client.get("/api/state").json()
+    assert state["turn"] == "w"
+    assert state["status"] == "active"
 
-        # GET /api/state
-        req_state = urllib.request.urlopen(f"{base_url}/api/state", timeout=5)
-        assert req_state.status == 200
-        state = json.loads(req_state.read().decode("utf-8"))
-        assert state["turn"] == "w"
-        assert state["status"] == "active"
+    # POST /api/move (human move e2e4)
+    res_move = client.post("/api/move", json={"move": "e2e4", "ai_reply": False})
+    assert res_move.status_code == 200
+    state_after_e4 = res_move.json()
+    assert state_after_e4["turn"] == "b"
+    assert "e2e4" in state_after_e4["history"]
 
-        # POST /api/move (Human move e2e4)
-        req_move = urllib.request.Request(
-            f"{base_url}/api/move",
-            data=json.dumps({"move": "e2e4", "ai_reply": False}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        res_move = urllib.request.urlopen(req_move, timeout=5)
-        assert res_move.status == 200
-        state_after_e4 = json.loads(res_move.read().decode("utf-8"))
-        assert state_after_e4["turn"] == "b"
-        assert "e2e4" in state_after_e4["history"]
+    # POST /api/move with AI reply
+    res_move_ai = client.post(
+        "/api/move", json={"move": "e7e5", "ai_reply": True, "depth": 1}
+    )
+    assert res_move_ai.status_code == 200
+    state_after_ai = res_move_ai.json()
+    # e2e4 (1), e7e5 (2), White AI reply (3)
+    assert len(state_after_ai["history"]) >= 3
 
-        # POST /api/move with AI reply
-        payload_ai = {"move": "e7e5", "ai_reply": True, "depth": 1}
-        req_move_ai = urllib.request.Request(
-            f"{base_url}/api/move",
-            data=json.dumps(payload_ai).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        res_move_ai = urllib.request.urlopen(req_move_ai, timeout=5)
-        assert res_move_ai.status == 200
-        state_after_ai = json.loads(res_move_ai.read().decode("utf-8"))
-        # e2e4 (history 1), e7e5 (history 2), White AI reply (history 3)
-        assert len(state_after_ai["history"]) >= 3
+    # POST /api/move with invalid move -> 400
+    res_bad = client.post("/api/move", json={"move": "invalid_move"})
+    assert res_bad.status_code == 400
 
-        # POST /api/move with invalid move -> 400
-        req_bad_move = urllib.request.Request(
-            f"{base_url}/api/move",
-            data=json.dumps({"move": "invalid_move"}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with pytest.raises(urllib.error.HTTPError) as exc_info:
-            urllib.request.urlopen(req_bad_move, timeout=5)
-        assert exc_info.value.code == 400
+    # POST /api/undo
+    res_undo = client.post("/api/undo", json={"steps": 1})
+    assert res_undo.status_code == 200
 
-        # POST /api/undo
-        req_undo = urllib.request.Request(
-            f"{base_url}/api/undo",
-            data=json.dumps({"steps": 1}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        res_undo = urllib.request.urlopen(req_undo, timeout=5)
-        assert res_undo.status == 200
+    # POST /api/ai_move
+    res_ai = client.post("/api/ai_move", json={"depth": 1})
+    assert res_ai.status_code == 200
 
-        # POST /api/ai_move
-        req_ai = urllib.request.Request(
-            f"{base_url}/api/ai_move",
-            data=json.dumps({"depth": 1}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        res_ai = urllib.request.urlopen(req_ai, timeout=5)
-        assert res_ai.status == 200
+    # POST /api/reset (custom FEN)
+    custom_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"
+    res_reset_fen = client.post("/api/reset", json={"fen": custom_fen})
+    assert res_reset_fen.status_code == 200
+    state_custom = res_reset_fen.json()
+    assert state_custom["fen"] == custom_fen
+    assert state_custom["turn"] == "b"
 
-        # POST /api/reset (custom FEN)
-        custom_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"
-        req_reset_fen = urllib.request.Request(
-            f"{base_url}/api/reset",
-            data=json.dumps({"fen": custom_fen}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        res_reset_fen = urllib.request.urlopen(req_reset_fen, timeout=5)
-        assert res_reset_fen.status == 200
-        state_custom = json.loads(res_reset_fen.read().decode("utf-8"))
-        assert state_custom["fen"] == custom_fen
-        assert state_custom["turn"] == "b"
+    # POST /api/reset with knight on c7, then move it
+    knight_fen = "r2k1bnr/ppN1pppp/2n5/8/8/2N5/PPPP1PPP/R1B1K2R w KQ - 0 1"
+    res_reset_kn = client.post("/api/reset", json={"fen": knight_fen})
+    assert res_reset_kn.status_code == 200
 
-        # POST /api/reset with knight on c7
-        knight_fen = "r2k1bnr/ppN1pppp/2n5/8/8/2N5/PPPP1PPP/R1B1K2R w KQ - 0 1"
-        req_reset_kn = urllib.request.Request(
-            f"{base_url}/api/reset",
-            data=json.dumps({"fen": knight_fen}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        res_reset_kn = urllib.request.urlopen(req_reset_kn, timeout=5)
-        assert res_reset_kn.status == 200
+    res_kn_move = client.post("/api/move", json={"move": "c7a8", "ai_reply": False})
+    assert res_kn_move.status_code == 200
+    state_kn = res_kn_move.json()
+    assert "c7a8" in state_kn["history"]
 
-        # Move knight c7 to a8 (succeeds as c7a8 without promotion)
-        req_kn_move = urllib.request.Request(
-            f"{base_url}/api/move",
-            data=json.dumps({"move": "c7a8", "ai_reply": False}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        res_kn_move = urllib.request.urlopen(req_kn_move, timeout=5)
-        assert res_kn_move.status == 200
-        state_kn = json.loads(res_kn_move.read().decode("utf-8"))
-        assert "c7a8" in state_kn["history"]
-        # POST /api/reset (initial position)
-        req_reset_init = urllib.request.Request(
-            f"{base_url}/api/reset",
-            data=json.dumps({}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        res_reset_init = urllib.request.urlopen(req_reset_init, timeout=5)
-        assert res_reset_init.status == 200
-        state_init = json.loads(res_reset_init.read().decode("utf-8"))
-        assert state_init["turn"] == "w"
-        assert state_init["history"] == []
+    # POST /api/reset (initial position)
+    res_reset_init = client.post("/api/reset", json={})
+    assert res_reset_init.status_code == 200
+    state_init = res_reset_init.json()
+    assert state_init["turn"] == "w"
+    assert state_init["history"] == []
 
-        # 404 for unknown endpoint
-        with pytest.raises(urllib.error.HTTPError) as err_404:
-            urllib.request.urlopen(f"{base_url}/nonexistent/endpoint", timeout=5)
-        assert err_404.value.code == 404
+    # 404 for unknown endpoint
+    assert client.get("/nonexistent/endpoint").status_code == 404
 
-    finally:
-        server.shutdown()
-        server.server_close()
+
+def test_api_move_rejects_empty_and_missing_move():
+    client = TestClient(create_app())
+
+    res_empty = client.post("/api/move", json={"move": "   "})
+    assert res_empty.status_code == 400
+
+    res_missing = client.post("/api/move", json={})
+    assert res_missing.status_code == 400
+
+
+def test_api_reset_rejects_invalid_fen():
+    client = TestClient(create_app())
+    res = client.post("/api/reset", json={"fen": "not-a-fen"})
+    assert res.status_code == 400
+    state = client.get("/api/state").json()
+    assert state["turn"] == "w"
+    assert state["history"] == []
+
+
+def test_api_ai_move_rejects_finished_game():
+    client = TestClient(create_app())
+    # Fool's mate: f3 e5 g4 Qh4#
+    for move in ("f2f3", "e7e5", "g2g4"):
+        res = client.post("/api/move", json={"move": move, "ai_reply": False})
+        assert res.status_code == 200
+    res_mate = client.post("/api/move", json={"move": "d8h4", "ai_reply": False})
+    assert res_mate.status_code == 200
+    state_mate = res_mate.json()
+    assert state_mate["is_checkmate"] is True
+    assert state_mate["winner"] == "b"
+
+    res_ai = client.post("/api/ai_move", json={"depth": 1})
+    assert res_ai.status_code == 400

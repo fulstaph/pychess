@@ -1,13 +1,56 @@
-"""Local Web UI server with Lichess Chessground board and REST API."""
+"""Local Web UI server (FastAPI) with Lichess Chessground board and REST API.
+
+Architecture
+------------
+The server keeps exactly ONE in-memory game per process (``WebSession`` on
+``app.state``).  This matches the single-user, single-board scope of the UI:
+
+- ``session.game``          -- the live ``ChessGame`` (authoritative position)
+- ``session.history``       -- every executed ``Move`` since the last reset
+- ``session.history_states`` -- game snapshots, one per history entry plus the
+                                initial position; undo restores an older
+                                snapshot from this list
+
+All state is mutated in place on purpose: ``app.state`` lives on the ASGI app
+object, which outlives any single request, and FastAPI request handlers must
+share one session.  ``ChessGame`` itself is still only mutated through its
+own atomic ``make_move`` / property interface.
+
+Endpoints (all JSON unless noted):
+
+    GET  /            -> the self-contained Chessground HTML page
+    GET  /api/state   -> full serialized position for the current session
+    POST /api/move    -> {"move": "e2e4", "ai_reply": bool, "depth": int,
+                          "stockfish": bool}; executes the human move and,
+                          when ``ai_reply`` is set, immediately plays the
+                          engine's reply in the same request
+    POST /api/ai_move -> {"depth": int, "stockfish": bool}; plays one engine
+                          move for the side to move
+    POST /api/undo    -> {"steps": int}; rolls the session back ``steps``
+                          half-moves (the UI sends 2 in AI mode so the human
+                          regains the move)
+    POST /api/reset   -> {"fen": "..."} or {}; loads a FEN position or the
+                          standard start and clears the history
+
+Error contract: invalid moves / FENs / bodies return HTTP 400 with
+``{"detail": "..."}``; the session is left untouched (fail fast, no partial
+state).  Engine failure (no Stockfish binary, malformed UCI reply) degrades
+to the built-in minimax instead of failing the request.
+"""
 
 import argparse
-import http.server
-import json
-import socketserver
+import logging
+import socket
 import sys
 import webbrowser
 from collections.abc import Sequence
-from typing import ClassVar
+from dataclasses import dataclass, field
+from typing import Any
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 
 from .engine import choose_move, evaluate
 from .game import ChessGame, from_fen
@@ -18,12 +61,38 @@ from .tui import get_captured_pieces
 from .uci import to_uci
 from .ui import get_html
 
+logger = logging.getLogger("chess.web")
+
+
+@dataclass
+class WebSession:
+    """Mutable per-server game state shared by all requests.
+
+    ``history_states[0]`` is always the position the session started (or was
+    reset) with; each executed move appends one more snapshot.  Undo pops
+    from the tail of both lists, so ``len(history_states) ==
+    len(history) + 1`` holds at all times.
+    """
+
+    game: ChessGame
+    history: list[Move] = field(default_factory=list)
+    history_states: list[ChessGame] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.history_states = [self.game]
+
 
 def serialize_game_state(
     game: ChessGame,
     moves_history: Sequence[Move] = (),
-) -> dict[str, object]:
-    """Serialize complete chess game state into a JSON-friendly dictionary."""
+) -> dict[str, Any]:
+    """Serialize complete chess game state into a JSON-friendly dictionary.
+
+    ``dests`` maps source square -> target squares for every legal move; the
+    Chessground frontend uses it to highlight legal destinations when a piece
+    is dragged.  ``legal_moves`` is the same set as plain UCI strings, which
+    the promotion detector (``a7a8q`` probe in ``app.js``) relies on.
+    """
     cap_w, cap_b, diff = get_captured_pieces(game.board)
     dests: dict[str, list[str]] = {}
     legal_moves_uci: list[str] = []
@@ -54,167 +123,209 @@ def serialize_game_state(
     }
 
 
-def get_html_template() -> str:
-    """Return the frontend HTML document loaded from chess.ui package."""
-    return get_html()
+class MoveRequest(BaseModel):
+    """Body for POST /api/move."""
+
+    move: str = ""
+    ai_reply: bool = False
+    depth: int = Field(default=2, ge=1)
+    stockfish: bool = False
 
 
-class ChessWebHandler(http.server.BaseHTTPRequestHandler):
-    """HTTP request handler providing REST API and Lichess Chessground frontend."""
+class UndoRequest(BaseModel):
+    """Body for POST /api/undo."""
 
-    game: ClassVar[ChessGame] = ChessGame()
-    history: ClassVar[list[Move]] = []
-    history_states: ClassVar[list[ChessGame]] = [game]
-    stockfish_path: ClassVar[str | None] = None
+    steps: int = Field(default=1, ge=1)
 
-    def log_message(self, format_str: str, *args: object) -> None:
-        """Suppress default stdout request logging."""
 
-    def _send_json(self, payload: dict[str, object], status: int = 200) -> None:
-        raw = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(raw)
+class ResetRequest(BaseModel):
+    """Body for POST /api/reset."""
 
-    def do_GET(self) -> None:
-        if self.path in ("/", "/index.html"):
-            raw_html = get_html().encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(raw_html)))
-            self.end_headers()
-            self.wfile.write(raw_html)
-            return
+    fen: str = ""
 
-        if self.path == "/api/state":
-            state_data = serialize_game_state(self.game, self.history)
-            self._send_json(state_data)
-            return
 
-        self.send_error(404, "Endpoint not found")
+class AIMoveRequest(BaseModel):
+    """Body for POST /api/ai_move."""
 
-    def do_POST(self) -> None:
-        content_length = int(self.headers.get("Content-Length", 0))
-        post_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+    depth: int = Field(default=2, ge=1)
+    stockfish: bool = False
+
+
+def _engine_move(
+    game: ChessGame,
+    history: list[Move],
+    depth: int,
+    use_stockfish: bool,
+    stockfish_path: str | None,
+) -> Move | None:
+    """Ask Stockfish when requested, otherwise fall back to minimax.
+
+    Stockfish is spawned per request (context manager closes the UCI
+    process) — cheap for a local single-user server, and it avoids leaking
+    subprocesses if the server shuts down mid-game.  Any startup/protocol
+    failure (missing binary, invalid ``bestmove`` reply) logs a warning and
+    transparently degrades to the built-in alpha-beta engine so the UI never
+    sees a 500 from the engine layer.
+    """
+    if use_stockfish:
         try:
-            body: dict[str, object] = (
-                json.loads(post_body.decode("utf-8")) if post_body else {}
+            sf_path = find_stockfish(stockfish_path)
+            logger.info("Using Stockfish at %s for AI move", sf_path)
+            with Stockfish(path=sf_path, skill_level=0) as sf:
+                return sf.get_move(game, moves_history=history)
+        except FileNotFoundError:
+            logger.warning("Stockfish binary not found; falling back to minimax")
+        except RuntimeError as err:
+            logger.warning("Stockfish failed (%s); falling back to minimax", err)
+    else:
+        logger.info("Using built-in minimax (depth=%d, quiescence)", depth)
+    return choose_move(game, depth=depth, quiescence=True)
+
+
+def create_app(stockfish_path: str | None = None) -> FastAPI:
+    """Build a FastAPI app with a fresh game session on ``app.state``.
+
+    The session lives on ``app.state`` (not a module global) so each app
+    instance — e.g. in tests via ``TestClient`` — gets its own isolated game.
+    """
+    app = FastAPI(title="pychess Web UI")
+    app.state.session = WebSession(game=ChessGame())
+    app.state.stockfish_path = stockfish_path
+
+    @app.get("/", response_class=HTMLResponse)
+    def index() -> str:
+        """Serve the self-contained frontend (CSS/JS inlined by ``chess.ui``)."""
+        return get_html()
+
+    @app.get("/api/state")
+    def api_state() -> dict[str, Any]:
+        """Return the current position; the UI polls it after load."""
+        session: WebSession = app.state.session
+        return serialize_game_state(session.game, session.history)
+
+    @app.post("/api/move")
+    def api_move(body: MoveRequest) -> dict[str, Any]:
+        """Execute a human move, optionally followed by an engine reply.
+
+        The move is applied first and its ``Move`` recorded; only then is the
+        engine consulted, so a slow or failing engine can never roll back the
+        human's move.  An invalid move raises 400 before any state changes.
+        """
+        session: WebSession = app.state.session
+        if not body.move.strip():
+            raise HTTPException(status_code=400, detail="No move specified")
+        try:
+            executed = session.game.make_move(body.move)
+        except ValueError as err:
+            logger.info("Rejected move %r: %s", body.move, err)
+            raise HTTPException(status_code=400, detail=f"Invalid move: {err}") from err
+
+        session.history.append(executed)
+        session.history_states.append(session.game)
+        logger.info("Executed %s; turn now %s", to_uci(executed), session.game.turn)
+
+        if body.ai_reply and session.game.legal_moves():
+            ai_move = _engine_move(
+                session.game,
+                session.history,
+                body.depth,
+                body.stockfish,
+                app.state.stockfish_path,
             )
-        except json.JSONDecodeError:
-            body = {}
+            if ai_move is not None:
+                session.game.make_move(ai_move)
+                session.history.append(ai_move)
+                session.history_states.append(session.game)
+                logger.info(
+                    "AI replied %s; turn now %s", to_uci(ai_move), session.game.turn
+                )
+            else:
+                logger.warning("Engine returned no move; game state unchanged")
 
-        if self.path == "/api/move":
-            move_str = str(body.get("move", "")).strip()
-            if not move_str:
-                self._send_json({"error": "No move specified"}, status=400)
-                return
+        return serialize_game_state(session.game, session.history)
+
+    @app.post("/api/ai_move")
+    def api_ai_move(body: AIMoveRequest) -> dict[str, Any]:
+        """Play one engine move for the side to move (no human move involved)."""
+        session: WebSession = app.state.session
+        if not session.game.legal_moves():
+            raise HTTPException(status_code=400, detail="No legal moves available")
+        ai_move = _engine_move(
+            session.game,
+            session.history,
+            body.depth,
+            body.stockfish,
+            app.state.stockfish_path,
+        )
+        if ai_move is not None:
+            session.game.make_move(ai_move)
+            session.history.append(ai_move)
+            session.history_states.append(session.game)
+            logger.info("AI move %s; turn now %s", to_uci(ai_move), session.game.turn)
+        return serialize_game_state(session.game, session.history)
+
+    @app.post("/api/undo")
+    def api_undo(body: UndoRequest) -> dict[str, Any]:
+        """Roll back ``steps`` half-moves; extra steps are silently ignored
+        once the session has unwound to its initial position."""
+        session: WebSession = app.state.session
+        for _ in range(body.steps):
+            if len(session.history_states) > 1:
+                session.history_states.pop()
+                if session.history:
+                    session.history.pop()
+        session.game = session.history_states[-1]
+        logger.info(
+            "Undo %d step(s); history now %d move(s)",
+            body.steps,
+            len(session.history),
+        )
+        return serialize_game_state(session.game, session.history)
+
+    @app.post("/api/reset")
+    def api_reset(body: ResetRequest) -> dict[str, Any]:
+        """Load a FEN position, or the standard start when the body is empty.
+
+        Invalid FENs return 400 and leave the current game untouched.
+        """
+        session: WebSession = app.state.session
+        if body.fen.strip():
             try:
-                executed = self.game.make_move(move_str)
+                session.game = from_fen(body.fen)
             except ValueError as err:
-                self._send_json({"error": f"Invalid move: {err}"}, status=400)
-                return
+                logger.info("Rejected FEN %r: %s", body.fen, err)
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid FEN: {err}"
+                ) from err
+            logger.info("Reset to FEN: %s", body.fen)
+        else:
+            session.game = ChessGame()
+            logger.info("Reset to standard start position")
+        session.history = []
+        session.history_states = [session.game]
+        return serialize_game_state(session.game, session.history)
 
-            self.history.append(executed)
-            self.history_states.append(self.game)
-
-            # Trigger AI reply if requested
-            ai_reply = bool(body.get("ai_reply", False))
-            if ai_reply and self.game.legal_moves():
-                depth = int(str(body.get("depth", "2")))
-                use_sf = bool(body.get("stockfish", False))
-                ai_move: Move | None = None
-                if use_sf:
-                    try:
-                        sf_path = find_stockfish(self.stockfish_path)
-                        with Stockfish(path=sf_path, skill_level=0) as sf:
-                            ai_move = sf.get_move(self.game, moves_history=self.history)
-                    except FileNotFoundError, RuntimeError:
-                        ai_move = choose_move(self.game, depth=depth, quiescence=True)
-                else:
-                    ai_move = choose_move(self.game, depth=depth, quiescence=True)
-
-                if ai_move:
-                    self.game.make_move(ai_move)
-                    self.history.append(ai_move)
-                    self.history_states.append(self.game)
-
-            self._send_json(serialize_game_state(self.game, self.history))
-            return
-
-        if self.path == "/api/ai_move":
-            if not self.game.legal_moves():
-                self._send_json({"error": "No legal moves available"}, status=400)
-                return
-            depth = int(str(body.get("depth", "2")))
-            use_sf = bool(body.get("stockfish", False))
-            ai_move = None
-            if use_sf:
-                try:
-                    sf_path = find_stockfish(self.stockfish_path)
-                    with Stockfish(path=sf_path, skill_level=0) as sf:
-                        ai_move = sf.get_move(self.game, moves_history=self.history)
-                except FileNotFoundError, RuntimeError:
-                    ai_move = choose_move(self.game, depth=depth, quiescence=True)
-            else:
-                ai_move = choose_move(self.game, depth=depth, quiescence=True)
-
-            if ai_move:
-                self.game.make_move(ai_move)
-                self.history.append(ai_move)
-                self.history_states.append(self.game)
-
-            self._send_json(serialize_game_state(self.game, self.history))
-            return
-
-        if self.path == "/api/undo":
-            steps = int(str(body.get("steps", "1")))
-            for _ in range(steps):
-                if len(self.history_states) > 1:
-                    self.history_states.pop()
-                    if self.history:
-                        self.history.pop()
-            ChessWebHandler.game = self.history_states[-1]
-            self._send_json(serialize_game_state(self.game, self.history))
-            return
-
-        if self.path == "/api/reset":
-            fen_input = str(body.get("fen", "")).strip()
-            if fen_input:
-                try:
-                    new_game = from_fen(fen_input)
-                except ValueError as err:
-                    self._send_json({"error": f"Invalid FEN: {err}"}, status=400)
-                    return
-                ChessWebHandler.game = new_game
-            else:
-                ChessWebHandler.game = ChessGame()
-
-            ChessWebHandler.history = []
-            ChessWebHandler.history_states = [ChessWebHandler.game]
-            self._send_json(serialize_game_state(self.game, self.history))
-            return
-
-        self.send_error(404, "Endpoint not found")
+    return app
 
 
-def create_web_server(
-    host: str = "127.0.0.1",
-    port: int = 8000,
-    stockfish_path: str | None = None,
-) -> http.server.HTTPServer:
-    """Create a configured HTTPServer instance for pychess web UI."""
-    ChessWebHandler.game = ChessGame()
-    ChessWebHandler.history = []
-    ChessWebHandler.history_states = [ChessWebHandler.game]
-    ChessWebHandler.stockfish_path = stockfish_path
+def _find_free_port(host: str, port: int) -> int:
+    """Bind-probe ``port`` and the nine following ports for a free one.
 
-    class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-        daemon_threads = True
-
-    return ThreadedHTTPServer((host, port), ChessWebHandler)
+    The bind is released immediately (context manager) so there is a small
+    race window before ``uvicorn`` re-binds; acceptable for a local tool.
+    Exits with a message if none of the candidates can be bound.
+    """
+    for candidate in range(port, port + 10):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind((host, candidate))
+                if candidate != port:
+                    logger.info("Port %d busy; using %d", port, candidate)
+                return candidate
+            except OSError:
+                continue
+    sys.stderr.write(f"Error: Could not bind to {host}:{port} or subsequent ports.\n")
+    sys.exit(1)
 
 
 def run_web_server(
@@ -224,37 +335,35 @@ def run_web_server(
     stockfish_path: str | None = None,
 ) -> None:
     """Start local web chessboard UI server and open in browser."""
-    actual_port = port
-    server: http.server.HTTPServer | None = None
+    # Configure logging once at the process entry point so both uvicorn's
+    # own records and chess.web records share one consistent format.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
-    for attempt in range(10):
-        try:
-            server = create_web_server(
-                host=host, port=actual_port, stockfish_path=stockfish_path
-            )
-            break
-        except OSError:
-            actual_port = port + attempt + 1
-
-    if server is None:
-        sys.stderr.write(
-            f"Error: Could not bind to {host}:{port} or subsequent ports.\n"
-        )
-        sys.exit(1)
-
+    actual_port = _find_free_port(host, port)
     url = f"http://{host}:{actual_port}"
     print(f"pychess Web UI running at: {url}")
     print("Press Ctrl+C to stop the server.")
+    logger.info("Binding FastAPI app to %s", url)
 
     if open_browser:
         webbrowser.open(url)
 
     try:
-        server.serve_forever()
-    except KeyboardInterrupt, EOFError:
+        # ``uvicorn.run`` blocks until the loop is cancelled (Ctrl+C) or the
+        # process receives EOF on stdin; the ASGI app is passed as an object
+        # (not an import string) because it carries the live session state.
+        uvicorn.run(
+            create_app(stockfish_path=stockfish_path),
+            host=host,
+            port=actual_port,
+            log_level="warning",
+        )
+    except (KeyboardInterrupt, EOFError):
         print("\nShutting down web server...")
-    finally:
-        server.server_close()
+        logger.info("Server stopped")
 
 
 def main(argv: Sequence[str] | None = None) -> None:

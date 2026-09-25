@@ -8,14 +8,20 @@ version = "0.1.0"
 description = "A simple, type-safe chess engine in Python"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
 
 [project.optional-dependencies]
 dev = [
     "mypy>=2.3,<3",
     "pytest>=8,<9",
     "pytest-cov>=5,<8",
-    "ruff>=0.16,<1",
+    # Ruff's formatter emits invalid Python 2 `except A, B:` syntax for the
+    # py314 target from 0.15.0 through 0.16.9 (latest at pin time); 0.14.14
+    # is the last release that formats py314 code correctly.
+    "ruff>=0.14.14,<0.15",
 ]
 
 notebooks = [
@@ -75,6 +81,11 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "S310"]
+"tests/*" = ["S101", "S310", "S603"]
 "notebooks/*" = ["E501", "S101"]
 "chess/web.py" = ["E501"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+]

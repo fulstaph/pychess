@@ -256,7 +256,7 @@ def test_cli_subprocesses():
     launcher_path.chmod(0o755)
 
     try:
-        res_series = subprocess.run(  # noqa: S603
+        res_series = subprocess.run(
             [
                 sys.executable,
                 "-m",

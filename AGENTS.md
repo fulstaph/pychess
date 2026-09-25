@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-`chess` (`pychess`) is a zero-runtime-dependency, type-safe chess engine and terminal game built for **Python 3.14+**. The package provides purely functional board representations, two-stage legal move generation, algebraic/coordinate notation parsing, and an interactive human-versus-engine terminal interface alongside educational Jupyter notebooks.
+`chess` (`pychess`) is a type-safe chess engine and terminal game built for **Python 3.14+**. The package provides purely functional board representations, two-stage legal move generation, algebraic/coordinate notation parsing, and an interactive human-versus-engine terminal interface alongside educational Jupyter notebooks.
 
 Key characteristics:
 - **Strict Immutability**: All core domain models (`Board`, `Piece`, `Move`, `GameState`) are immutable or frozen. Board transitions produce fresh board instances via copy-on-write persistent data structures.
-- **Zero Runtime Dependencies**: Relies exclusively on Python 3.14 standard library primitives (`dataclasses`, `enum`, `typing`, `collections.abc`, `re`, `subprocess`, `sys`).
+- **Engine Dependencies**: The chess engine core (`piece`, `move`, `game`, `attacks`, `helpers`, `engine`, `uci`, `stockfish`, `tui`) relies exclusively on Python 3.14 standard library primitives. The web UI layer (`chess/web.py`) is a FastAPI + Uvicorn application — the only non-engine third-party dependencies.
 - **Strict Static Typing**: Annotated with modern Python 3.14 syntax (`type` aliases, pipe unions, `Literal`), type-checked strictly with `mypy`, and distributed with a PEP 561 `py.typed` marker.
 
 ---
@@ -190,7 +190,7 @@ task build
 
 ### 4. Dependency & Execution Patterns
 - **Pure Functions**: Attack queries (`attacks.py`) and move transitions (`move.py`) are pure functions taking snapshots and returning values.
-- **Synchronous Execution**: No `asyncio`, threads, or background event loops. The CLI operates via standard blocking `input()` / `print()` in a loop.
+- **Synchronous Engine Execution**: The engine core and CLI are fully synchronous — no `asyncio`, threads, or background event loops. The CLI operates via standard blocking `input()` / `print()` in a loop. (The FastAPI web layer is the only asynchronous surface.)
 - **Subprocess CLI Interaction**: Interactive terminal tests use `subprocess.run` with `PYTHONUNBUFFERED=1` and explicit `timeout` parameters.
 
 ---

@@ -6,7 +6,7 @@ import sys
 def run_cli(
     inputs: str, args: list[str] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603
+    return subprocess.run(
         [sys.executable, "-m", "chess.engine", *(args or [])],
         input=inputs,
         text=True,

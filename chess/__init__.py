@@ -29,6 +29,7 @@ if TYPE_CHECKING:
         to_uci,
     )
     from .web import (
+        create_app,
         run_web_server,
     )
 
@@ -47,6 +48,7 @@ __all__ = [
     "Stockfish",
     "UCIEngine",
     "UCIEngineError",
+    "create_app",
     "find_stockfish",
     "format_pgn",
     "format_series_summary",
@@ -97,7 +99,7 @@ def __getattr__(name: str) -> object:
         from . import tui
 
         return getattr(tui, name)
-    if name == "run_web_server":
+    if name in ("run_web_server", "create_app"):
         from . import web
 
         return getattr(web, name)
