@@ -1,537 +1,643 @@
-"""
-Chess Game Engine - Working Version
+"""Legal chess play over immutable board snapshots."""
 
-A fully functional chess game with all basic rules:
-- Board and piece movement
-- Turn management  
-- Check, checkmate, and stalemate detection
-- Castling, en passant, and pawn promotion
-"""
+import re
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
+from enum import StrEnum
 
-from dataclasses import dataclass
-from typing import Literal, Tuple, Optional, List
-from enum import Enum
-
-from .piece import Board, Piece, PieceType, Color
-from .attacks import is_in_check
-from .helpers import notation_to_coords
-
-
-class GameStatus(str, Enum):
-    """Possible game states."""
-    ACTIVE = 'active'
-    CHECK = 'check'
-    CHECKMATE = 'checkmate'
-    STALEMATE = 'stalemate'
-    DRAW = 'draw'
+from .attacks import (
+    DIAGONAL,
+    KING_STEPS,
+    KNIGHT_STEPS,
+    ORTHOGONAL,
+    find_king,
+    is_in_check,
+    is_square_attacked,
+    on_board,
+)
+from .helpers import notation_to_coords, square_notation
+from .move import Move, MoveSpecial
+from .piece import Board, Color, Piece, PieceType, Square
 
 
-@dataclass
-class SimpleMove:
-    """A chess move with piece and square information."""
-    piece: Piece
-    from_sq: Tuple[int, int]
-    to_sq: Tuple[int, int]
-    captured: Optional[Piece] = None
-    special: Literal['none', 'castling', 'en_passant', 'promotion'] = 'none'
-    promotion_to: Optional[str] = None
+class GameStatus(StrEnum):
+    ACTIVE = "active"
+    CHECK = "check"
+    CHECKMATE = "checkmate"
+    STALEMATE = "stalemate"
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class GameState:
-    """Current game state."""
     board: Board
-    turn: Color = 'w'
-    move_num: int = 1
-    status: GameStatus = GameStatus.ACTIVE
-    en_passant: Optional[Tuple[int, int]] = None
-    castling_w: set = None
-    castling_b: set = None
-    
-    def __post_init__(self):
-        if self.castling_w is None:
-            self.castling_w = {'kingside', 'queenside'}
-        if self.castling_b is None:
-            self.castling_b = {'kingside', 'queenside'}
+    turn: Color
+    move_num: int
+    status: GameStatus
+    castling_rights: frozenset[str]
+    en_passant: Square | None
+    halfmove_clock: int = 0
 
 
-def square_coords(move_str: str) -> Tuple[Tuple[int, int], Tuple[int, int]]:
-    """
-    Extract from and to square coordinates from a move string.
-    
-    Handles:
-    - e4 -> from e2 to e4
-    - Nxe4 -> capture on e4
-    - O-O -> castling
-    - O-O-O -> castling
-    """
-    move = move_str.lower().strip()
-    
-    if move in ['o-o', 'o-o-o']:
-        if 'o-o-o' in move or move == 'o-o-o':
-            return (7, 4), (7, 2)  # Queenside
-        return (7, 4), (7, 6)  # Kingside
-    
-    # Find the piece character
-    piece_idx = -1
-    for i, c in enumerate(move):
-        if c.isalpha():
-            piece_idx = i
-            break
-    
-    if piece_idx == -1:
-        from_sq = move[:2]
-        to_sq = move[2:4]
+def _other(color: Color) -> Color:
+    return "b" if color == "w" else "w"
+
+
+def _move_variants(
+    piece: Piece, source: Square, target: Square, captured: Piece | None = None
+) -> tuple[Move, ...]:
+    if piece.type == PieceType.PAWN and target[0] == (0 if piece.color == "w" else 7):
+        return tuple(
+            Move(piece, source, target, captured, "promotion", kind)
+            for kind in (
+                PieceType.QUEEN,
+                PieceType.ROOK,
+                PieceType.BISHOP,
+                PieceType.KNIGHT,
+            )
+        )
+    return (Move(piece, source, target, captured),)
+
+
+def _piece_moves(state: GameState, source: Square, piece: Piece) -> Iterator[Move]:
+    board = state.board
+    row, col = source
+    if piece.type == PieceType.PAWN:
+        step = -1 if piece.color == "w" else 1
+        forward = (row + step, col)
+        if on_board(*forward) and board.get(forward) is None:
+            yield from _move_variants(piece, source, forward)
+            two = (row + 2 * step, col)
+            if row == (6 if piece.color == "w" else 1) and board.get(two) is None:
+                yield Move(piece, source, two)
+        for dc in (-1, 1):
+            target = (row + step, col + dc)
+            if not on_board(*target):
+                continue
+            victim = board.get(target)
+            if victim and victim.color != piece.color and victim.type != PieceType.KING:
+                yield from _move_variants(piece, source, target, victim)
+            elif target == state.en_passant and victim is None:
+                captured = board.get((row, col + dc))
+                if captured == Piece(PieceType.PAWN, _other(piece.color)):
+                    yield Move(piece, source, target, captured, "en_passant")
+        return
+    if piece.type in (PieceType.KNIGHT, PieceType.KING):
+        steps = KNIGHT_STEPS if piece.type == PieceType.KNIGHT else KING_STEPS
+        for dr, dc in steps:
+            target = (row + dr, col + dc)
+            if on_board(*target):
+                victim = board.get(target)
+                if victim is None or (
+                    victim.color != piece.color and victim.type != PieceType.KING
+                ):
+                    yield Move(piece, source, target, victim)
+        if piece.type == PieceType.KING:
+            yield from _castling_moves(state, source, piece)
+        return
+    directions = (
+        ORTHOGONAL
+        if piece.type == PieceType.ROOK
+        else DIAGONAL
+        if piece.type == PieceType.BISHOP
+        else ORTHOGONAL + DIAGONAL
+    )
+    for dr, dc in directions:
+        r, c = row + dr, col + dc
+        while on_board(r, c):
+            target = (r, c)
+            victim = board.get(target)
+            if victim is not None:
+                if victim.color != piece.color and victim.type != PieceType.KING:
+                    yield Move(piece, source, target, victim)
+                break
+            yield Move(piece, source, target)
+            r, c = r + dr, c + dc
+
+
+def _castling_moves(state: GameState, source: Square, king: Piece) -> Iterator[Move]:
+    row = 7 if king.color == "w" else 0
+    if source != (row, 4) or is_in_check(state.board, king.color):
+        return
+    opponent = _other(king.color)
+    castle_options: tuple[
+        tuple[MoveSpecial, str, int, tuple[int, ...], tuple[int, ...], int], ...
+    ] = (
+        ("castle_k", "K" if king.color == "w" else "k", 7, (5, 6), (5, 6), 6),
+        ("castle_q", "Q" if king.color == "w" else "q", 0, (1, 2, 3), (3, 2), 2),
+    )
+    for side, right, rook_col, empty_cols, transit_cols, destination in castle_options:
+        if right not in state.castling_rights:
+            continue
+        if state.board.get((row, rook_col)) != Piece(PieceType.ROOK, king.color):
+            continue
+        if any(state.board.get((row, col)) is not None for col in empty_cols):
+            continue
+        # The king vacates its home square while crossing the transit squares.
+        exposed = state.board.with_piece(source, None)
+        if any(
+            is_square_attacked((row, col), opponent, exposed) for col in transit_cols
+        ):
+            continue
+        yield Move(king, source, (row, destination), special=side)
+
+
+def _legal_moves(state: GameState) -> tuple[Move, ...]:
+    moves: list[Move] = []
+    for row, squares in enumerate(state.board.squares):
+        for col, piece in enumerate(squares):
+            if piece is None or piece.color != state.turn:
+                continue
+            moves.extend(
+                move
+                for move in _piece_moves(state, (row, col), piece)
+                if not is_in_check(move.execute(state.board), state.turn)
+            )
+    return tuple(moves)
+
+
+def _is_insufficient_material(board: Board) -> bool:
+    pieces: list[tuple[Piece, Square]] = []
+    for r, row in enumerate(board.squares):
+        for c, piece in enumerate(row):
+            if piece is not None:
+                pieces.append((piece, (r, c)))
+    if any(
+        p.type in (PieceType.PAWN, PieceType.ROOK, PieceType.QUEEN) for p, _ in pieces
+    ):
+        return False
+    if len(pieces) <= 2:
+        return True
+    if len(pieces) == 3:
+        return True
+    if len(pieces) == 4:
+        minors = [(p, sq) for p, sq in pieces if p.type != PieceType.KING]
+        if (
+            len(minors) == 2
+            and minors[0][0].type == PieceType.BISHOP
+            and minors[1][0].type == PieceType.BISHOP
+            and minors[0][0].color != minors[1][0].color
+        ):
+            sq_color1 = (minors[0][1][0] + minors[0][1][1]) % 2
+            sq_color2 = (minors[1][1][0] + minors[1][1][1]) % 2
+            return sq_color1 == sq_color2
+    return False
+
+
+def _status(state: GameState) -> GameStatus:
+    check = is_in_check(state.board, state.turn)
+    if not _legal_moves(state):
+        return GameStatus.CHECKMATE if check else GameStatus.STALEMATE
+    if state.halfmove_clock >= 100 or _is_insufficient_material(state.board):
+        return GameStatus.STALEMATE
+    return GameStatus.CHECK if check else GameStatus.ACTIVE
+
+
+def _next_rights(rights: frozenset[str], move: Move) -> frozenset[str]:
+    removed: set[str] = set()
+    if move.piece.type == PieceType.KING:
+        removed.update("KQ" if move.piece.color == "w" else "kq")
+    home_rooks: tuple[tuple[Color, int, tuple[str, str]], ...] = (
+        ("w", 7, ("Q", "K")),
+        ("b", 0, ("q", "k")),
+    )
+    for color, row, sides in home_rooks:
+        for col, right in zip((0, 7), sides, strict=True):
+            home = (row, col)
+            if (
+                move.piece.type == PieceType.ROOK
+                and move.piece.color == color
+                and move.from_square == home
+            ) or (
+                move.captured_piece == Piece(PieceType.ROOK, color)
+                and move.to_square == home
+            ):
+                removed.add(right)
+    return rights.difference(removed)
+
+
+def _advanced(state: GameState, move: Move) -> GameState:
+    rights = _next_rights(state.castling_rights, move)
+    en_passant: Square | None = None
+    if (
+        move.piece.type == PieceType.PAWN
+        and abs(move.to_square[0] - move.from_square[0]) == 2
+    ):
+        en_passant = (
+            (move.from_square[0] + move.to_square[0]) // 2,
+            move.from_square[1],
+        )
+    if move.piece.type == PieceType.PAWN or move.is_capture():
+        next_halfmove = 0
     else:
-        from_sq = move[:piece_idx]
-        to_sq = move[piece_idx+1:]
-    
-    # Trim to 2 characters each
-    from_sq = from_sq[:2]
-    to_sq = to_sq[:2]
-    
-    return notation_to_coords(from_sq), notation_to_coords(to_sq)
+        next_halfmove = state.halfmove_clock + 1
+
+    next_state = GameState(
+        move.execute(state.board),
+        _other(state.turn),
+        state.move_num + (state.turn == "b"),
+        GameStatus.ACTIVE,
+        rights,
+        en_passant,
+        next_halfmove,
+    )
+    return replace(next_state, status=_status(next_state))
 
 
 class ChessGame:
-    """
-    Chess game engine with basic rules.
-    """
-    
-    def __init__(self, board: Optional[Board] = None):
-        """Initialize a new game."""
-        self.board = board or Board.from_notation()
-        self.turn = 'w'
-        self.status = GameStatus.ACTIVE
-        self.move_num = 1
-    
-    def make_move(self, move_str: str) -> SimpleMove:
-        """
-        Make a move on the board.
-        """
-        from_sq, to_sq = square_coords(move_str)
-        piece = self.board.get(from_sq)
-        
-        if piece is None:
-            raise ValueError(f"No piece at {move_str[:2]}")
-        
-        # Basic validation
-        if not self._piece_can_move(piece, from_sq, to_sq):
-            raise ValueError(f"Invalid move: {move_str}")
-        
-        move = SimpleMove(
-            piece=piece,
-            from_sq=from_sq,
-            to_sq=to_sq,
-            special='none'
+    """A game façade that commits only complete, legal state transitions."""
+
+    def __init__(
+        self,
+        board: Board | None = None,
+        turn: Color = "w",
+        castling_rights: frozenset[str] | None = None,
+        en_passant: Square | None = None,
+        halfmove_clock: int = 0,
+        move_num: int = 1,
+    ) -> None:
+        custom = board is not None
+        board = board if custom else Board.from_notation()
+        if not isinstance(board, Board) or turn not in ("w", "b"):
+            raise ValueError("Invalid board or turn")
+        find_king(board, "w")
+        find_king(board, "b")
+        rights = (
+            castling_rights
+            if castling_rights is not None
+            else (frozenset() if custom else frozenset("KQkq"))
         )
-        
-        # Check for special move type
-        move_str_lower = move_str.lower()
-        if len(move_str_lower) == 3:
-            move.special = 'castling'
-        elif len(move_str_lower) > 4 and move_str_lower[4] == '=':
-            move.special = 'promotion'
-            move.promotion_to = move_str_lower[5]
-        
-        new_board = self._execute_move(move)
-        self.board = new_board
-        
-        # Handle en passant target
-        if piece.type == PieceType.PAWN:
-            if piece.color == 'w' and from_sq[0] == 4 and to_sq[0] == 6:
-                self.en_passant = (5, 5)
-            elif piece.color == 'b' and from_sq[0] == 5 and to_sq[0] == 7:
-                self.en_passant = (4, 4)
-            else:
-                self.en_passant = None
-        
-        # Update turn
-        if piece.color != self.turn:
-            self.turn = 'b' if self.turn == 'w' else 'w'
-        
-        # Increment move number after each player's turn
-        if self.turn != 'w':
-            self.move_num += 1
-        
-        # Update castling rights
-        self._update_castling_rights(move)
-        
-        # Check game status
-        if is_in_check(self.board, self.turn):
-            self.status = GameStatus.CHECK
-        
-        # Update castling rights
-        self._update_castling_rights(move)
-        
-        if len(self._legal_moves()) == 0:
-            self.status = GameStatus.STALEMATE
-        elif self.turn == 'w':
-            if is_in_check(self.board, 'b'):
-                self.status = GameStatus.CHECKMATE
-        elif self.turn == 'b':
-            if is_in_check(self.board, 'w'):
-                self.status = GameStatus.CHECKMATE
-        
-        return move
-    
-    def _piece_can_move(self, piece: Piece, from_sq: Tuple[int, int], to_sq: Tuple[int, int]) -> bool:
-        """Check if a piece can move from one square to another."""
-        row, col = from_sq
-        target_row, target_col = to_sq
-        
-        if piece.type == PieceType.PAWN:
-            return PieceType.PAWN.can_move(from_sq, to_sq)
-        elif piece.type == PieceType.ROOK:
-            return PieceType.ROOK.can_move(from_sq, to_sq)
-        elif piece.type == PieceType.KNIGHT:
-            return PieceType.KNIGHT.can_move(from_sq, to_sq)
-        elif piece.type == PieceType.BISHOP:
-            return PieceType.BISHOP.can_move(from_sq, to_sq)
-        elif piece.type == PieceType.QUEEN:
-            return PieceType.QUEEN.can_move(from_sq, to_sq)
-        elif piece.type == PieceType.KING:
-            return PieceType.KING.can_move(from_sq, to_sq)
-        return False
-    
-    def _execute_move(self, move: SimpleMove) -> Board:
-        """Execute a move and return a new board state."""
-        new_board = Board()
-        
-        # Copy all pieces from old board
-        for row in range(Board.BOARD_SIZE):
-            for col in range(Board.BOARD_SIZE):
-                piece = self.board.get((row, col))
-                if piece is not None:
-                    new_board.set((row, col), piece)
-        
-        # Remove piece from source square
-        from_sq = move.from_sq
-        target_sq = move.to_sq
-        
-        new_board.set(from_sq, None)
-        
-        # Move piece to target square
-        new_board.set(target_sq, move.piece)
-        
-        # Handle capture (opponent's piece already removed by new_board.set)
-        
-        # Handle en passant
-        if move.special == 'en_passant':
-            ep_sq = move.en_passant
-            captured_row, captured_col = ep_sq
-            new_board.set((captured_row, captured_col), None)
-        
-        # Handle castling
-        if move.special == 'castling':
-            if move.piece.color == 'w':
-                # White castling
-                piece_row, piece_col = move.from_sq
-                rook_sq = (piece_row, 7)  # h1
-                new_board.set(rook_sq, None)
-                
-                if move.to_sq[1] == 6:  # Kingside (to g1)
-                    new_board.set((piece_row, 6), Piece('k', 'w'))
-                    new_board.set((piece_row, 5), Piece('r', 'w'))
-                else:  # Queenside (to c1)
-                    new_board.set((piece_row, 2), Piece('k', 'w'))
-                    new_board.set((piece_row, 3), Piece('r', 'w'))
-            else:
-                # Black castling
-                piece_row, piece_col = move.from_sq
-                rook_sq = (piece_row, 7)  # h8
-                new_board.set(rook_sq, None)
-                
-                if move.to_sq[1] == 6:  # Kingside (to g8)
-                    new_board.set((piece_row, 6), Piece('k', 'b'))
-                    new_board.set((piece_row, 5), Piece('r', 'b'))
-                else:  # Queenside (to c8)
-                    new_board.set((piece_row, 2), Piece('k', 'b'))
-                    new_board.set((piece_row, 3), Piece('r', 'b'))
-        
-        # Handle promotion
-        if move.special == 'promotion':
-            new_board.set((target_sq[0], target_sq[1]),
-                         Piece(move.promotion_to, move.piece.color))
-        
-        return new_board
-    
-    def _update_castling_rights(self, move: SimpleMove) -> None:
-        """Update castling rights after a move."""
-        if move.special == 'castling':
-            player = move.piece.color
-            self.castling_w = set()
-            self.castling_b = set()
-        elif move.piece.type == PieceType.KING:
-            if move.piece.color == 'w':
-                self.castling_w = set()
-            else:
-                self.castling_b = set()
-        elif move.piece.type == PieceType.ROOK:
-            if move.piece.color == 'w':
-                if move.from_sq[1] == 0:  # a1
-                    self.castling_w = set()
-                elif move.from_sq[1] == 7:  # h1
-                    self.castling_w = set()
-                elif move.to_sq[1] == 0:  # a-file
-                    self.castling_w = {'queenside'}
-                elif move.to_sq[1] == 7:  # h-file
-                    self.castling_w = {'kingside'}
-            else:
-                if move.from_sq[1] == 0:
-                    self.castling_b = set()
-                elif move.from_sq[1] == 7:
-                    self.castling_b = set()
-                elif move.to_sq[1] == 0:
-                    self.castling_b = {'queenside'}
-                elif move.to_sq[1] == 7:
-                    self.castling_b = {'kingside'}
-    
-    def _legal_moves(self) -> List[SimpleMove]:
-        """
-        Get all legal moves for the current player.
-        
-        This is a simplified version - doesn't fully check castling safety.
-        """
-        moves = []
-        for row in range(Board.BOARD_SIZE):
-            for col in range(Board.BOARD_SIZE):
-                piece = self.board.get((row, col))
-                if piece and piece.color == self.turn:
-                    if piece.type in [PieceType.PAWN, PieceType.KING]:
-                        can_move = PieceType.PAWN.can_move((row, col)) or PieceType.KING.can_move((row, col))
-                    elif piece.type == PieceType.ROOK:
-                        can_move = PieceType.ROOK.can_move((row, col))
-                    elif piece.type == PieceType.KNIGHT:
-                        can_move = PieceType.KNIGHT.can_move((row, col))
-                    elif piece.type == PieceType.BISHOP:
-                        can_move = PieceType.BISHOP.can_move((row, col))
-                    elif piece.type == PieceType.QUEEN:
-                        can_move = PieceType.QUEEN.can_move((row, col))
-                    
-                    if can_move:
-                        # Check all possible destinations
-                        for dr, dc in PieceType.PAWN.get_all_directions() if piece.type == PieceType.PAWN else []:
-                            tr, tc = row + dr, col + dc
-                            if 0 <= tr < 8 and 0 <= tc < 8:
-                                to_sq = (tr, tc)
-                                if self._can_move_to_piece(piece, (row, col), to_sq):
-                                    moves.append(SimpleMove(
-                                        piece=piece,
-                                        from_sq=(row, col),
-                                        to_sq=to_sq,
-                                        special='none'
-                                    ))
-                        break
-                    moves.append(SimpleMove(
-                        piece=piece,
-                        from_sq=(row, col),
-                        to_sq=None,
-                        special='none'
-                    ))
-        
-        return moves
-    
-    def _can_move_to_piece(self, piece: Piece, from_sq: Tuple[int, int], to_sq: Tuple[int, int]) -> bool:
-        """Check if piece can move to a square (without checking safety)."""
-        from_row, from_col = from_sq
-        to_row, to_col = to_sq
-        
-        target_piece = self.board.get(to_sq)
-        
-        # Cannot capture own piece
-        if target_piece and target_piece.color == piece.color:
-            return False
-        
-        # Check piece type specific rules
-        if piece.type == PieceType.PAWN:
-            # Pawn can only move forward or capture diagonally
-            direction = 1 if piece.color == 'w' else -1
-            if to_sq[1] == from_sq[1]:
-                # Forward move
-                if from_row == 4 and to_row == 6 and piece.color == 'w':
-                    return True
-                elif from_row == 5 and to_row == 6 and piece.color == 'b':
-                    return True
-                elif to_row == from_row + direction and self.board.is_empty(to_sq):
-                    return True
-            elif abs(to_sq[1] - from_col) == 1:
-                # Diagonal capture (capture move)
-                direction = 1 if piece.color == 'w' else -1
-                return to_row == from_row + direction
-            return False
-        elif piece.type == PieceType.KNIGHT:
-            dr = abs(to_sq[0] - from_sq[0])
-            dc = abs(to_sq[1] - from_sq[1])
-            return (dr == 2 and dc == 1) or (dr == 1 and dc == 2)
-        elif piece.type == PieceType.ROOK:
-            if to_sq[0] == from_sq[0] and to_sq[1] != from_sq[1]:
-                # Vertical move - check path
-                if self._path_clear(from_sq, to_sq):
-                    return True
-            elif to_sq[1] == from_sq[1] and to_sq[0] != from_sq[0]:
-                # Horizontal move - check path
-                if self._path_clear(from_sq, to_sq):
-                    return True
-            return False
-        elif piece.type == PieceType.BISHOP:
-            dr = abs(to_sq[0] - from_sq[0])
-            dc = abs(to_sq[1] - from_sq[1])
-            if dr == dc and dr > 0:
-                # Diagonal move - check path
-                if self._path_clear_diagonal(from_sq, to_sq):
-                    return True
-            return False
-        elif piece.type == PieceType.QUEEN:
-            if to_sq[0] == from_sq[0] and to_sq[1] != from_sq[1]:
-                if self._path_clear(from_sq, to_sq):
-                    return True
-            elif to_sq[1] == from_sq[1] and to_sq[0] != from_sq[0]:
-                if self._path_clear(from_sq, to_sq):
-                    return True
-            else:
-                dr = abs(to_sq[0] - from_sq[0])
-                dc = abs(to_sq[1] - from_sq[1])
-                if dr == dc and dr > 0:
-                    if self._path_clear_diagonal(from_sq, to_sq):
-                        return True
-            return False
-        elif piece.type == PieceType.KING:
-            return abs(to_sq[0] - from_sq[0]) <= 1 and abs(to_sq[1] - from_sq[1]) <= 1
-        
-        return False
-    
-    def _path_clear(self, from_sq: Tuple[int, int], to_sq: Tuple[int, int]) -> bool:
-        """Check if path between squares is clear (for sliding pieces)."""
-        from_row, from_col = from_sq
-        to_row, to_col = to_sq
-        
-        if from_row == to_row:
-            # Horizontal move
-            step = 1 if to_col > from_col else -1
-            col = from_col + step
-            while col != to_col:
-                if self.board.get((from_row, col)) is not None:
-                    return False
-                col += step
-            return True
+        if not isinstance(rights, frozenset) or not rights <= frozenset("KQkq"):
+            raise ValueError("Invalid castling rights")
+        if en_passant is not None:
+            board.get(en_passant)
+            pawn_row = 3 if turn == "w" else 4
+            if (
+                en_passant[0] != (2 if turn == "w" else 5)
+                or board.get(en_passant) is not None
+                or board.get((pawn_row, en_passant[1]))
+                != Piece(PieceType.PAWN, _other(turn))
+            ):
+                raise ValueError("Invalid en passant target")
+        if halfmove_clock < 0:
+            raise ValueError("Halfmove clock cannot be negative")
+        if move_num < 1:
+            raise ValueError("Move number must be at least 1")
+        state = GameState(
+            board, turn, move_num, GameStatus.ACTIVE, rights, en_passant, halfmove_clock
+        )
+        self._state = replace(state, status=_status(state))
+        self._position_history: tuple[
+            tuple[Board, Color, frozenset[str], Square | None], ...
+        ] = (
+            (
+                self._state.board,
+                self._state.turn,
+                self._state.castling_rights,
+                self._state.en_passant,
+            ),
+        )
+
+    @property
+    def board(self) -> Board:
+        return self._state.board
+
+    @property
+    def turn(self) -> Color:
+        return self._state.turn
+
+    @property
+    def status(self) -> GameStatus:
+        return self._state.status
+
+    @property
+    def move_num(self) -> int:
+        return self._state.move_num
+
+    @property
+    def halfmove_clock(self) -> int:
+        return self._state.halfmove_clock
+
+    def legal_moves(self) -> tuple[Move, ...]:
+        if self.status in (GameStatus.CHECKMATE, GameStatus.STALEMATE):
+            return ()
+        return _legal_moves(self._state)
+
+    def _select_move(self, move: str | Move) -> Move:
+        candidates = self.legal_moves()
+        if isinstance(move, str):
+            selected = self._parse_move(move, candidates)
+        elif isinstance(move, Move):
+            selected = next(
+                (candidate for candidate in candidates if candidate == move), None
+            )
         else:
-            # Vertical move
-            step = 1 if to_row > from_row else -1
-            row = from_row + step
-            while row != to_row:
-                if self.board.get((row, from_col)) is not None:
-                    return False
-                row += step
-            return True
-    
-    def _path_clear_diagonal(self, from_sq: Tuple[int, int], to_sq: Tuple[int, int]) -> bool:
-        """Check diagonal path is clear."""
-        from_row, from_col = from_sq
-        to_row, to_col = to_sq
-        
-        step_row = 1 if to_row > from_row else -1
-        step_col = 1 if to_col > from_col else -1
-        
-        row = from_row + step_row
-        col = from_col + step_col
-        
-        while (row, col) != to_sq:
-            if self.board.get((row, col)) is not None:
-                return False
-            row += step_row
-            col += step_col
-        
-        return True
-    
-    def _check_safety(self, from_sq: Tuple[int, int], to_sq: Tuple[int, int]) -> bool:
-        """
-        Check if moving from from_sq to to_sq is safe.
-        
-        Verifies that our king won't be left in check.
-        """
-        # Create a test board
-        board = self.board
-        piece = board.get(from_sq)
-        
-        # Move the piece
-        board.set(from_sq, None)
-        board.set(to_sq, piece)
-        
-        # Check if our king is in check
-        if is_in_check(board, self.turn):
-            # Move back
-            board.set(to_sq, None)
-            board.set(from_sq, piece)
-            return False
-        
-        return True
-    
-    def is_check(self) -> bool:
-        """Check if current player is in check."""
-        return is_in_check(self.board, self.turn)
-    
-    def is_checkmate(self) -> bool:
-        """Check if the game is in checkmate."""
-        return self.status == GameStatus.CHECKMATE
-    
-    def is_stalemate(self) -> bool:
-        """Check if the game is in stalemate."""
-        return self.status == GameStatus.STALEMATE
-    
-    def is_draw(self) -> bool:
-        """Check if the game is a draw."""
-        return self.status == GameStatus.DRAW
-    
-    def get_winner(self) -> Optional[Color]:
-        """Get the winner of the game."""
-        if self.status == GameStatus.CHECKMATE:
-            return 'b' if self.turn == 'w' else 'w'
-        return None
-    
-    def get_turn(self) -> Color:
-        """Get whose turn it is."""
-        return self.turn
-    
+            selected = None
+        if selected is None:
+            raise ValueError(f"Illegal move: {move!r}")
+        return selected
+
+    def make_move(self, move: str | Move) -> Move:
+        selected = self._select_move(move)
+        self._state = _advanced(self._state, selected)
+        pos_key = (
+            self._state.board,
+            self._state.turn,
+            self._state.castling_rights,
+            self._state.en_passant,
+        )
+        self._position_history = (*self._position_history, pos_key)
+        if (
+            self._position_history.count(pos_key) >= 3
+            and self._state.status != GameStatus.CHECKMATE
+        ):
+            self._state = replace(self._state, status=GameStatus.STALEMATE)
+        return selected
+
+    def after(self, move: str | Move) -> ChessGame:
+        selected = self._select_move(move)
+        sibling = object.__new__(ChessGame)
+        sibling._state = _advanced(self._state, selected)
+        pos_key = (
+            sibling._state.board,
+            sibling._state.turn,
+            sibling._state.castling_rights,
+            sibling._state.en_passant,
+        )
+        sibling._position_history = (*self._position_history, pos_key)
+        if (
+            sibling._position_history.count(pos_key) >= 3
+            and sibling._state.status != GameStatus.CHECKMATE
+        ):
+            sibling._state = replace(sibling._state, status=GameStatus.STALEMATE)
+        return sibling
+
+    def _parse_move(self, text: str, candidates: tuple[Move, ...]) -> Move | None:
+        suffix = text[-1] if text.endswith(("+", "#")) else ""
+        body = text[:-1] if suffix else text
+        coordinate = re.fullmatch(r"([a-h][1-8])([a-h][1-8])(?:=?([qrbnQRBN]))?", body)
+        if coordinate:
+            source, target = (
+                notation_to_coords(coordinate[1]),
+                notation_to_coords(coordinate[2]),
+            )
+            promotion = PieceType(coordinate[3].lower()) if coordinate[3] else None
+            matches = [
+                move
+                for move in candidates
+                if move.from_square == source
+                and move.to_square == target
+                and move.promotion_to == promotion
+            ]
+        else:
+            matches = [
+                move
+                for move in candidates
+                if self._san(move, candidates) == body
+                or (
+                    move.special.startswith("castle_")
+                    and self._san(move, candidates).lower() == body.lower()
+                )
+            ]
+        if len(matches) != 1:
+            return None
+        selected = matches[0]
+        if suffix:
+            outcome = _advanced(self._state, selected).status
+            if (suffix == "#" and outcome != GameStatus.CHECKMATE) or (
+                suffix == "+" and outcome != GameStatus.CHECK
+            ):
+                return None
+        return selected
+
+    def _san(self, move: Move, candidates: tuple[Move, ...]) -> str:
+        if move.special == "castle_k":
+            return "O-O"
+        if move.special == "castle_q":
+            return "O-O-O"
+        destination = square_notation(*move.to_square)
+        capture = "x" if move.is_capture() else ""
+        promotion = f"={move.promotion_to.value.upper()}" if move.promotion_to else ""
+        origin = square_notation(*move.from_square)
+        if move.piece.type == PieceType.PAWN:
+            return (origin[0] if capture else "") + capture + destination + promotion
+        rivals = [
+            other
+            for other in candidates
+            if other != move
+            and other.piece.type == move.piece.type
+            and other.to_square == move.to_square
+        ]
+        disambiguation = ""
+        if rivals:
+            if all(other.from_square[1] != move.from_square[1] for other in rivals):
+                disambiguation = origin[0]
+            elif all(other.from_square[0] != move.from_square[0] for other in rivals):
+                disambiguation = origin[1]
+            else:
+                disambiguation = origin
+        symbol = move.piece.type.value
+        if not isinstance(symbol, str):
+            raise TypeError("Piece type notation must be a string")
+        return symbol.upper() + disambiguation + capture + destination
+
     def get_board(self) -> Board:
-        """Get the current board."""
         return self.board
-    
+
+    def get_turn(self) -> Color:
+        return self.turn
+
     def castles(self, player: Color, side: str) -> bool:
-        """Check if player has castling rights."""
-        if player == 'w':
-            return side in self.castling_w
-        else:
-            return side in self.castling_b
+        if player not in ("w", "b") or side not in ("kingside", "queenside"):
+            raise ValueError("Invalid player or castling side")
+        right = (
+            ("K" if side == "kingside" else "Q")
+            if player == "w"
+            else ("k" if side == "kingside" else "q")
+        )
+        return right in self._state.castling_rights
+
+    def is_check(self) -> bool:
+        return is_in_check(self.board, self.turn)
+
+    def is_checkmate(self) -> bool:
+        return self.status == GameStatus.CHECKMATE
+
+    def is_stalemate(self) -> bool:
+        return self.status == GameStatus.STALEMATE
+
+    def is_fifty_moves(self) -> bool:
+        return self._state.halfmove_clock >= 100
+
+    def is_threefold_repetition(self) -> bool:
+        pos_key = (
+            self._state.board,
+            self._state.turn,
+            self._state.castling_rights,
+            self._state.en_passant,
+        )
+        return self._position_history.count(pos_key) >= 3
+
+    def is_insufficient_material(self) -> bool:
+        return _is_insufficient_material(self.board)
+
+    def is_draw(self) -> bool:
+        return (
+            self.is_stalemate()
+            or self.is_fifty_moves()
+            or self.is_threefold_repetition()
+            or self.is_insufficient_material()
+        )
+
+    @classmethod
+    def from_fen(cls, fen: str) -> ChessGame:
+        """Create a ChessGame from a Forsyth-Edwards Notation (FEN) string."""
+        tokens = fen.strip().split()
+        if not tokens:
+            raise ValueError("FEN string cannot be empty")
+        board = Board.from_fen(tokens[0])
+        turn: Color = "w"
+        if len(tokens) > 1:
+            if tokens[1] not in ("w", "b"):
+                raise ValueError(f"Invalid turn in FEN: {tokens[1]!r}")
+            turn = "w" if tokens[1] == "w" else "b"
+
+        castling_rights: frozenset[str] = frozenset()
+        if len(tokens) > 2 and tokens[2] != "-":
+            if not set(tokens[2]) <= set("KQkq"):
+                raise ValueError(f"Invalid castling rights in FEN: {tokens[2]!r}")
+            castling_rights = frozenset(tokens[2])
+
+        en_passant: Square | None = None
+        if len(tokens) > 3 and tokens[3] != "-":
+            try:
+                en_passant = notation_to_coords(tokens[3])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid en passant square in FEN: {tokens[3]!r}"
+                ) from exc
+
+        halfmove = 0
+        if len(tokens) > 4:
+            try:
+                halfmove = int(tokens[4])
+                if halfmove < 0:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(
+                    f"Invalid halfmove clock in FEN: {tokens[4]!r}"
+                ) from None
+
+        move_num = 1
+        if len(tokens) > 5:
+            try:
+                move_num = int(tokens[5])
+                if move_num < 1:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(
+                    f"Invalid fullmove number in FEN: {tokens[5]!r}"
+                ) from None
+
+        return cls(
+            board=board,
+            turn=turn,
+            castling_rights=castling_rights,
+            en_passant=en_passant,
+            halfmove_clock=halfmove,
+            move_num=move_num,
+        )
+
+    def get_winner(self) -> Color | None:
+        return _other(self.turn) if self.is_checkmate() else None
+
+    def to_fen(self) -> str:
+        return to_fen(self)
 
 
-# =============================================================================
-# Board Display
-# =============================================================================
-def print_board(board: Board) -> None:
-    """Print the board in standard chess notation."""
-    ranks = ['8', '7', '6', '5', '4', '3', '2', '1']
-    
-    for row in range(Board.BOARD_SIZE):
-        line = []
-        for col in range(Board.BOARD_SIZE):
-            piece = board.get((row, col))
-            if piece is None:
-                char = '.'
-            elif piece.type == PieceType.PAWN:
-                char = 'P' if piece.color == 'w' else 'p'
-            elif piece.type == PieceType.ROOK:
-                char = 'R' if piece.color == 'w' else 'r'
-            elif piece.type == PieceType.KNIGHT:
-                char = 'N' if piece.color == 'w' else 'n'
-            elif piece.type == PieceType.BISHOP:
-                char = 'B' if piece.color == 'w' else 'b'
-            elif piece.type == PieceType.QUEEN:
-                char = 'Q' if piece.color == 'w' else 'q'
-            elif piece.type == PieceType.KING:
-                char = 'K' if piece.color == 'w' else 'k'
+UNICODE_PIECES: dict[tuple[PieceType, Color], str] = {
+    (PieceType.KING, "w"): "\u2654",
+    (PieceType.QUEEN, "w"): "\u2655",
+    (PieceType.ROOK, "w"): "\u2656",
+    (PieceType.BISHOP, "w"): "\u2657",
+    (PieceType.KNIGHT, "w"): "\u2658",
+    (PieceType.PAWN, "w"): "\u2659",
+    (PieceType.KING, "b"): "\u265a",
+    (PieceType.QUEEN, "b"): "\u265b",
+    (PieceType.ROOK, "b"): "\u265c",
+    (PieceType.BISHOP, "b"): "\u265d",
+    (PieceType.KNIGHT, "b"): "\u265e",
+    (PieceType.PAWN, "b"): "\u265f",
+}
+
+
+def print_board(
+    board: Board, unicode_pieces: bool = False, ansi_colors: bool = False
+) -> None:
+    """Show ranks eight to one, optionally with Unicode glyphs and ANSI colors."""
+    for row, squares in enumerate(board.squares):
+        cells: list[str] = []
+        for col, piece in enumerate(squares):
+            if unicode_pieces and piece is not None:
+                symbol = UNICODE_PIECES[(piece.type, piece.color)]
+            elif piece is not None:
+                symbol = (
+                    piece.type.value.upper() if piece.color == "w" else piece.type.value
+                )
             else:
-                char = '.'
-            
-            line.append(f" {char} ")
-        print("".join(line) + f" {ranks[row]}")
+                symbol = "."
+
+            if ansi_colors:
+                is_light = (row + col) % 2 == 0
+                bg = "\033[48;5;250m" if is_light else "\033[48;5;240m"
+                fg = "\033[30m" if is_light else "\033[97m"
+                cells.append(f"{bg}{fg} {symbol} \033[0m")
+            else:
+                cells.append(symbol)
+
+        sep = "" if ansi_colors else " "
+        print(f"{8 - row} " + sep.join(cells))
+    if ansi_colors:
+        print("   a  b  c  d  e  f  g  h")
+    else:
+        print("  a b c d e f g h")
+
+
+def to_fen(state_or_game: GameState | ChessGame) -> str:
+    """Serialize a game state or game to Forsyth-Edwards Notation (FEN)."""
+    state = (
+        state_or_game._state if isinstance(state_or_game, ChessGame) else state_or_game
+    )
+    board = state.board
+    rank_strings: list[str] = []
+    for row in range(8):
+        empty_count = 0
+        rank_chars: list[str] = []
+        for col in range(8):
+            piece = board.squares[row][col]
+            if piece is None:
+                empty_count += 1
+            else:
+                if empty_count > 0:
+                    rank_chars.append(str(empty_count))
+                    empty_count = 0
+                symbol = (
+                    piece.type.value.upper() if piece.color == "w" else piece.type.value
+                )
+                rank_chars.append(symbol)
+        if empty_count > 0:
+            rank_chars.append(str(empty_count))
+        rank_strings.append("".join(rank_chars))
+    board_part = "/".join(rank_strings)
+    castling_part = "".join(c for c in "KQkq" if c in state.castling_rights) or "-"
+    ep_part = (
+        square_notation(*state.en_passant) if state.en_passant is not None else "-"
+    )
+    return (
+        f"{board_part} {state.turn} {castling_part} {ep_part} "
+        f"{state.halfmove_clock} {state.move_num}"
+    )
+
+
+def from_fen(fen: str) -> ChessGame:
+    """Create a ChessGame from a Forsyth-Edwards Notation (FEN) string."""
+    return ChessGame.from_fen(fen)

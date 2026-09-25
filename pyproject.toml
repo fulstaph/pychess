@@ -7,6 +7,74 @@ name = "chess"
 version = "0.1.0"
 description = "A simple, type-safe chess engine in Python"
 readme = "README.md"
-requires-python = ">=3.8"
-license = "MIT"
+requires-python = ">=3.14"
 dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=2.3,<3",
+    "pytest>=8,<9",
+    "pytest-cov>=5,<8",
+    "ruff>=0.16,<1",
+]
+
+notebooks = [
+    "ipykernel>=6,<8",
+    "jupyterlab>=4,<5",
+    "nbclient>=0.10,<1",
+]
+
+[tool.setuptools]
+packages = ["chess", "chess.ui"]
+
+[tool.setuptools.package-data]
+chess = ["py.typed"]
+"chess.ui" = ["*.html", "*.css", "*.js"]
+
+[tool.mypy]
+python_version = "3.14"
+files = ["chess"]
+strict = true
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "ASYNC",
+    "B",
+    "BLE",
+    "C4",
+    "DTZ",
+    "E",
+    "EXE",
+    "F",
+    "FA",
+    "FLY",
+    "FURB",
+    "G",
+    "I",
+    "ICN",
+    "LOG",
+    "N",
+    "PERF",
+    "PGH",
+    "PIE",
+    "RET",
+    "RSE",
+    "RUF",
+    "S",
+    "SIM",
+    "SLOT",
+    "T10",
+    "UP",
+    "W",
+    "YTT",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S310"]
+"notebooks/*" = ["E501", "S101"]
+"chess/web.py" = ["E501"]

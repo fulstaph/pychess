@@ -1,0 +1,114 @@
+version: '3'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  install:
+    desc: Install the locked development environment
+    cmds:
+      - uv sync --python 3.14 --extra dev --locked
+
+  play:
+    desc: Start the terminal chess game
+    cmds:
+      - uv run --locked python -m chess.engine {{.CLI_ARGS}}
+
+  play:tui:
+    desc: Start the terminal chess game with rich dashboard and Unicode pieces
+    cmds:
+      - uv run --locked python -m chess.engine --dashboard --unicode {{.CLI_ARGS}}
+
+  play:large:
+    desc: Start the terminal chess game with large board (size 2) and Unicode pieces
+    cmds:
+      - uv run --locked python -m chess.engine --dashboard --unicode --size 2 {{.CLI_ARGS}}
+
+  play:giant:
+    desc: Start the terminal chess game with giant board (size 4) and scaled piece art
+    cmds:
+      - uv run --locked python -m chess.engine --dashboard --unicode --size 4 {{.CLI_ARGS}}
+
+  play:stockfish:
+    desc: Play interactively against Stockfish in the terminal
+    cmds:
+      - uv run --locked python -m chess.stockfish --human {{.CLI_ARGS}}
+
+  match:
+    desc: Run a tournament match series against Stockfish
+    cmds:
+      - uv run --locked python -m chess.stockfish {{.CLI_ARGS}}
+
+  uci:
+    desc: Run pychess as a Universal Chess Interface (UCI) engine server
+    cmds:
+      - uv run --locked python -m chess.uci
+
+  web:
+    desc: Launch the interactive Lichess Chessground Web UI
+    cmds:
+      - uv run --locked python -m chess.web {{.CLI_ARGS}}
+  notebooks:
+    desc: Launch the chess programming notebooks
+    cmds:
+      - uv run --locked --extra notebooks jupyter lab notebooks
+
+  test:
+    desc: Run tests with the 80% coverage threshold
+    cmds:
+      - uv run --locked --extra dev pytest --cov=chess --cov-fail-under=80 -q {{.CLI_ARGS}}
+
+  test:unit:
+    desc: Run test suite quickly without coverage instrumentation
+    cmds:
+      - uv run --locked --extra dev pytest tests/ -q {{.CLI_ARGS}}
+
+  test:cov:
+    desc: Run tests with detailed terminal missing-lines coverage report
+    cmds:
+      - uv run --locked --extra dev pytest --cov=chess --cov-report=term-missing tests/ {{.CLI_ARGS}}
+
+  bench:
+    desc: Run move-generation perft benchmark
+    cmds:
+      - uv run --locked --extra dev pytest tests/test_rules.py -k perft -v
+  lint:
+    desc: Check Python lint
+    cmds:
+      - uv run --locked --extra dev ruff check chess tests notebooks
+
+  format:
+    desc: Format Python source and tests
+    cmds:
+      - uv run --locked --extra dev ruff format chess tests
+
+  format-check:
+    desc: Check Python formatting without changes
+    cmds:
+      - uv run --locked --extra dev ruff format --check chess tests
+
+  typecheck:
+    desc: Check Python types
+    cmds:
+      - uv run --locked --extra dev mypy chess
+
+  check:
+    desc: Run lint, format, types, and tests
+    cmds:
+      - task: lint
+      - task: format-check
+      - task: typecheck
+      - task: test
+
+  build:
+    desc: Build the package distributions
+    cmds:
+      - uv build
+
+  clean:
+    desc: Clean build artifacts, bytecode, and test caches
+    cmds:
+      - rm -rf build/ dist/ *.egg-info .pytest_cache/ .coverage .mypy_cache/ .ruff_cache/
