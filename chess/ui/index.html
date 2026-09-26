@@ -1,5 +1,14 @@
 <!DOCTYPE html>
 <html lang="en">
+  <!--
+    pychess Web UI — single self-contained HTML document.
+
+    ``chess/ui/__init__.py::get_html()`` reads this file plus ``style.css``
+    and ``app.js`` and inlines them into the two placeholders
+    (``/* __INJECT_CSS__ */`` and ``// __INJECT_JS__``), so the served page
+    needs no separate asset requests. Only the Chessground stylesheets
+    load from a CDN.
+  -->
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -18,6 +27,9 @@
   </header>
 
   <main>
+    <!-- Chessground mount point: #cg-board is populated by app.js; the
+         promotion dialog (#promo-modal) is an overlay shown only on a
+         pawn promotion. The eval bar below the board tracks engine score. -->
     <div class="board-container">
       <div id="board-wrap">
         <div id="cg-board"></div>
@@ -30,9 +42,12 @@
           </div>
         </div>
       </div>
+      <!-- Eval bar: #eval-fill width encodes the -1000..+1000 engine score -->
       <div id="eval-bar"><div id="eval-fill"></div></div>
     </div>
 
+    <!-- Sidebar: status bar, opponent selector, move history, control
+         buttons, and the FEN loader (see app.js for handlers). -->
     <div class="sidebar">
       <div class="panel-section">
         <h3>Match Status</h3>
@@ -45,6 +60,7 @@
           <div>B captures: <span id="cap-b" class="cap-list"></span></div>
         </div>
       </div>
+      <!-- Opponent/mode selector: minimax depths, Stockfish, or pass & play -->
 
       <div class="panel-section">
         <h3>Opponent</h3>
@@ -55,11 +71,13 @@
           <option value="human">Pass & Play (Two-Player)</option>
         </select>
       </div>
+      <!-- Move history: rebuilt as paired "N. White  Black" rows by app.js -->
 
       <div class="panel-section">
         <h3>Move History</h3>
         <div id="moves-history" class="moves-box"></div>
       </div>
+      <!-- Control buttons: undo (2 plies in AI modes), flip, AI move, reset -->
 
       <div class="panel-section btn-row">
         <button id="btn-undo">Undo</button>
@@ -67,6 +85,7 @@
         <button id="btn-ai" class="primary">AI Move</button>
         <button id="btn-new">New Game</button>
       </div>
+      <!-- FEN input: pasting a position POSTs /api/reset with that FEN -->
 
       <div class="panel-section">
         <h3>Position FEN</h3>
@@ -74,6 +93,7 @@
       </div>
     </div>
   </main>
+  <!-- Inline module script: app.js is injected here by get_html() -->
 
   <script type="module">
 // __INJECT_JS__

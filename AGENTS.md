@@ -67,6 +67,11 @@ The codebase is organized into four distinct functional layers:
 - **`choose_move(game: ChessGame) -> Move`**: Evaluates `game.legal_moves()` using a greedy capture heuristic (`PIECE_VALUES`: Q=9, R=5, B=3, N=3, P=1), defaulting to the first generated move on ties. (Roadmap: upgrading to depth-2 alpha-beta minimax per `SEARCH_OPPONENT_PLAN.md`).
 - **`main()`**: Synchronous REPL driving side selection, rendering boards via `print_board()`, processing human input with retry on invalid moves, and executing AI responses.
 
+### 5. Logging (`chess/log.py`)
+- **Module loggers** live under the `"chess"` root (e.g. `chess.game`, `chess.web`); the standard library propagates them upward, so no handler is ever attached inside library modules.
+- **`LogRing`** is a bounded FIFO of `LogEntry` records (timestamp, level, name, message) fed by `LogHandler`; the TUI dashboard renders its tail as a live LOG panel.
+- **`setup_logging(level)`** is idempotent and called only by CLI entry points (`chess.engine`, `chess.stockfish`, `chess.web`), never by library code.
+
 ---
 
 ## Key Directories
@@ -77,6 +82,7 @@ pychess/
 │   ├── attacks.py         # Attack tables, raycasting, check detection
 │   ├── game.py            # ChessGame façade, GameState, legal move generator, SAN parser
 │   ├── helpers.py         # Coordinate conversions, square notation, PlayerColor enum
+│   ├── log.py             # LogRing ring buffer, LogHandler, setup_logging, get_logger
 │   ├── move.py            # Move dataclass and pure board execution logic
 │   ├── piece.py           # Piece dataclass, PieceType enum, immutable 8x8 Board
 │   ├── py.typed           # PEP 561 marker for inline type annotations

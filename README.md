@@ -35,6 +35,8 @@ If [go-task](https://taskfile.dev/) is installed, run `task` to list available t
 * `task check`: Run complete verification gate (lint, format-check, strict typecheck, tests).
 * `task clean`: Remove build artifacts and caches.
 
+In dashboard mode the side panel shows a live LOG view of recent engine events; add `--verbose` (`-v`) to raise console logging to DEBUG level.
+
 The CLI menu accepts `1` to play White, `2` to play Black, and `3` or `q` to quit. In-game commands include `undo` (take back move), `moves [sq]` (list legal moves), `eval` (position breakdown), `pgn` (export PGN), `flip` (flip board view), `fen` (export FEN), and `help`.
 
 ## Python API

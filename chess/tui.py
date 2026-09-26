@@ -1,4 +1,32 @@
-"""Terminal User Interface (TUI) components, layout, and rendering."""
+"""Terminal User Interface (TUI) components, layout, and rendering.
+
+Architecture
+------------
+This module is a strictly render-only layer: every function takes plain
+data (a ``Board``, ``ChessGame``, or a move sequence) and returns ANSI-
+formatted strings. There is no state, no I/O, and no mutation — callers
+``print`` the results, so the same helpers can be reused by the CLI
+(``chess.engine``), tests, and future TUI runtimes.
+
+Palette
+    Color is expressed as a fixed set of ANSI 256-color escape constants
+    (``BG_*`` for square backgrounds, ``FG_*`` for piece/level foregrounds)
+    plus ``BOLD``/``DIM``/``RESET``. When ``ansi_colors`` is False the
+    renderers degrade to plain text with "." for empty squares.
+
+Board scaling
+    Pieces are drawn as multi-line ASCII/Unicode art that scales with
+    ``size`` (1 = one glyph per square, 2/3/4 = 2/3/4 lines per square),
+    so the same board renders from a compact in-line grid to a giant
+    poster without changing the caller's code.
+
+Dashboard layout
+    ``render_dashboard`` composes two columns side by side: the board on
+    the left, a status sidebar on the right (match info, lead, captures,
+    recent moves, command hints). An optional ``ring`` parameter appends a
+    box-drawn LOG panel below the sidebar so live log entries stay
+    visible during play.
+"""
 
 from collections import Counter
 from collections.abc import Sequence
@@ -7,8 +35,11 @@ from .attacks import find_king
 from .engine import PIECE_VALUES, evaluate, move_notation
 from .game import UNICODE_PIECES, ChessGame, GameStatus
 from .helpers import notation_to_coords
+from .log import LogRing, get_logger
 from .move import Move
 from .piece import Board, Color, Piece, PieceType, Square
+
+logger = get_logger("tui")
 
 STARTING_PIECE_COUNTS: dict[PieceType, int] = {
     PieceType.PAWN: 8,
@@ -41,7 +72,17 @@ FG_RED = "\033[38;5;203m"
 def get_captured_pieces(
     board: Board,
 ) -> tuple[tuple[Piece, ...], tuple[Piece, ...], int]:
-    """Calculate pieces captured by White, pieces captured by Black, and material diff.
+    """Derive captured-piece lists and the material difference.
+
+    The board only shows what is ON it, so captures are reconstructed by
+    diffing the current piece counts against the starting set (kings are
+    excluded — they cannot be captured). Each missing black piece is
+    attributed to White's capture list and vice versa.
+
+    ``material_diff`` = value captured by White minus value captured by
+    Black, i.e. positive means White is ahead in the capture race, from
+    White's perspective. Both lists are sorted by descending piece value
+    so the most important trophies print first.
 
     Returns:
         (captured_by_white, captured_by_black, material_diff)
@@ -78,7 +119,13 @@ def get_captured_pieces(
 
 
 def format_recent_moves(moves: Sequence[Move], max_pairs: int = 4) -> list[str]:
-    """Format recent moves into algebraic notation pairs."""
+    """Format the most recent moves as numbered "N. e4 e5" pairs.
+
+    Moves are grouped into full moves (white then black) starting from
+    the FIRST move, then only the last ``max_pairs`` pairs are shown so
+    the panel tracks the latest play. A trailing half-move (white played,
+    black not yet) is printed without a second column.
+    """
     if not moves:
         return ["  (No moves yet)"]
 
@@ -102,7 +149,13 @@ def format_recent_moves(moves: Sequence[Move], max_pairs: int = 4) -> list[str]:
 
 
 def format_legal_moves(game: ChessGame, from_square_str: str | None = None) -> str:
-    """Format available legal moves for the current position."""
+    """Format legal moves grouped by piece type for the current position.
+
+    When ``from_square_str`` is given (e.g. "e4"), the list is filtered to
+    moves of the piece on that square; an unparseable square returns an
+    "Invalid square" message instead of raising. Output is one line per
+    piece type, alphabetized, with moves sorted in coordinate order.
+    """
     all_moves = game.legal_moves()
     if from_square_str:
         try:
@@ -126,7 +179,13 @@ def format_legal_moves(game: ChessGame, from_square_str: str | None = None) -> s
 
 
 def format_eval_breakdown(board: Board) -> str:
-    """Calculate and format positional and material score breakdown."""
+    """Split the engine's total score into material vs positional parts.
+
+    Material totals are computed directly from piece values; the
+    positional component is what remains after subtracting the pure
+    material difference from ``evaluate``'s white-positive total, so the
+    three lines always add up (material diff + positional == total).
+    """
     mat_w = sum(
         PIECE_VALUES[p.type]
         for row in board.squares
@@ -155,7 +214,14 @@ def format_pgn(
     black_name: str = "Black",
     result: str = "*",
 ) -> str:
-    """Format game into a standard Portable Game Notation (PGN) string."""
+    """Build a PGN string: five tag pair headers, then the move text.
+
+    Move tokens use coordinate notation grouped into full moves
+    ("1. e4 e5"); a lone trailing white move is printed without its
+    black reply. The game result marker ("1-0", "0-1", "1/2-1/2", ...)
+    is appended after the moves unless it is the default "*" (ongoing),
+    which PGN convention keeps in the Result header only.
+    """
     headers = [
         '[Event "pychess Terminal Game"]',
         '[Site "Terminal"]',
@@ -176,7 +242,6 @@ def format_pgn(
 
     if result != "*":
         move_tokens.append(result)
-
     return "\n".join(headers) + " ".join(move_tokens) + "\n"
 
 
@@ -186,7 +251,15 @@ def get_piece_art_lines(
     size: int,
     unicode_pieces: bool = True,
 ) -> list[str]:
-    """Return scaled multi-line piece art for a given piece and board size."""
+    """Return the multi-line art for one piece at the given board size.
+
+    Scaling rule: size 1 is a single glyph line; sizes 2/3/4 return
+    2/3/4 lines of ASCII art with the glyph embedded on the middle-ish
+    row, so every piece occupies a square that is ``size`` lines tall
+    (matching ``get_empty_square_lines``). Unicode mode uses the
+    Unicode chess glyphs; plain mode falls back to upper-case (white) /
+    lower-case (black) single letters.
+    """
     glyph = (
         UNICODE_PIECES[(piece_type, color)]
         if unicode_pieces
@@ -237,7 +310,12 @@ def get_piece_art_lines(
 
 
 def get_empty_square_lines(size: int, ansi_colors: bool) -> list[str]:
-    """Return lines for an empty board square of given size."""
+    """Return the ``size`` blank lines of a vacant square.
+
+    Must match the height of the piece art for the same size so filled
+    and empty squares align; a centered dot (middle line) marks the
+    square, styled for ANSI or plain text.
+    """
     dot = "·" if ansi_colors else "."
     if size == 1:
         return [f" {dot} "]
@@ -257,9 +335,22 @@ def render_board_lines(
     check_square: Square | None = None,
     size: int = 1,
 ) -> list[str]:
-    """Render the 8x8 chess board into formatted terminal string lines."""
+    """Render the 8x8 board as a list of terminal lines, framed by file labels.
+
+    Layout: a header/footer row of file letters (a-h), and per board row
+    the rank number is printed on the vertical middle line of the square
+    (squares are ``size`` lines tall). ``flip`` reverses both row and
+    column order so Black can be drawn at the bottom.
+
+    Highlights (ANSI mode only): the from/to squares of ``last_move``
+    get a gold background (``BG_HIGHLIGHT``); ``check_square`` (the
+    king currently in check) gets red (``BG_CHECK``) and takes priority
+    over the last-move highlight. Without ANSI colors, squares degrade
+    to plain text with single-letter pieces and "." for empty.
+    """
     if size not in (1, 2, 3, 4):
         raise ValueError(f"Board size must be 1, 2, 3, or 4, got {size}")
+    logger.debug("rendering board size=%d", size)
 
     rows = list(range(8)) if not flip else list(range(7, -1, -1))
     cols = list(range(8)) if not flip else list(range(7, -1, -1))
@@ -287,6 +378,8 @@ def render_board_lines(
 
     sq_height = size
     for r in rows:
+        # board.squares is indexed with row 0 == rank 8 (white's back
+        # rank), hence the inversion.
         rank_num = 8 - r
         for h in range(sq_height):
             is_center_row = h == (sq_height // 2)
@@ -342,6 +435,49 @@ def render_board_lines(
     return lines
 
 
+_LOG_LEVEL_COLORS: dict[str, str] = {
+    "INFO": FG_CYAN,
+    "WARNING": FG_GOLD,
+    "ERROR": FG_RED,
+    "DEBUG": DIM,
+}
+
+
+def render_log_panel(ring: LogRing, height: int = 6) -> str:
+    """Render a box-drawn "LOG" panel with the ring's most recent entries.
+
+    The panel is exactly ``height`` lines tall (top border + content +
+    bottom border) and 36 columns wide, matching the dashboard sidebar.
+    Entries are colored by level (INFO cyan, WARNING gold, ERROR red,
+    DEBUG dim), with the oldest entry at the top and the newest at the
+    bottom; the ring is trimmed to the most recent entries that fit the
+    content area. An empty ring renders an empty box with a dim
+    "no events" line.
+    """
+    inner_w = 34  # sidebar width (36) minus the two border columns
+    inner_h = max(height - 2, 0)
+    entries = ring.recent(inner_h) if inner_h > 0 else ()
+
+    body: list[str] = []
+    if entries:
+        # ring.recent() returns newest LAST, so iterating in order puts
+        # the newest entry on the bottom content line of the box.
+        for entry in entries:
+            text = f"{entry.level:<7} {entry.message}"[:inner_w]
+            color = _LOG_LEVEL_COLORS.get(entry.level, RESET)
+            body.append(f"{color}{text}{RESET}")
+    elif inner_h > 0:
+        body.append(f"{DIM}  no events{RESET}")
+    body.extend([" " * inner_w] * (inner_h - len(body)))
+
+    lines = [
+        "┌─ LOG " + "─" * (inner_w - 6) + "┐",
+        *body,
+        "└" + "─" * inner_w + "┘",
+    ]
+    return "\n".join(lines)
+
+
 def render_dashboard(
     game: ChessGame,
     moves_history: Sequence[Move] = (),
@@ -351,8 +487,22 @@ def render_dashboard(
     white_name: str = "White",
     black_name: str = "Black",
     size: int = 1,
+    ring: LogRing | None = None,
 ) -> str:
-    """Render a side-by-side terminal dashboard containing board and game status."""
+    """Render a side-by-side terminal dashboard: board left, status right.
+
+    Column composition: the left column is ``render_board_lines`` (with
+    last-move and check highlights); the right column is a fixed-width
+    sidebar (36 columns) holding the match header, turn/status, material
+    lead, captured pieces, recent moves, and command hints. The two
+    columns are merged row by row, padding the shorter one so the output
+    is a ragged-free block; four spaces separate the columns.
+
+    When ``ring`` is given, a box-drawn LOG panel (see
+    :func:`render_log_panel`) is appended below the sidebar so recent
+    log entries stay visible during play; with ``ring=None`` (the
+    default) the layout is exactly as before and no panel is printed.
+    """
     last_move = moves_history[-1] if moves_history else None
     check_sq = (
         find_king(game.board, game.turn)
@@ -406,6 +556,12 @@ def render_dashboard(
     sidebar.append("─" * 36)
     sidebar.append("Commands: undo | moves [sq] | eval | pgn | flip | size [1-4] | q")
 
+    # Optional LOG panel: appended below the status sections so recent
+    # entries stay visible while playing; omitted entirely when no ring
+    # is supplied, keeping the legacy layout byte-identical.
+    if ring is not None:
+        sidebar.append("")
+        sidebar.extend(render_log_panel(ring).split("\n"))
     # Merge board lines and sidebar lines side-by-side
     combined_lines: list[str] = []
     max_rows = max(len(board_lines), len(sidebar))

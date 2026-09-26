@@ -8,6 +8,12 @@ from .move import Move
 from .piece import Board, Color, Piece, PieceType, Square
 
 if TYPE_CHECKING:
+    from .log import (
+        LogEntry,
+        LogRing,
+        get_logger,
+        setup_logging,
+    )
     from .stockfish import (
         MatchResult,
         SeriesResult,
@@ -38,6 +44,8 @@ __all__ = [
     "ChessGame",
     "Color",
     "GameStatus",
+    "LogEntry",
+    "LogRing",
     "MatchResult",
     "Move",
     "Piece",
@@ -54,6 +62,7 @@ __all__ = [
     "format_series_summary",
     "from_fen",
     "get_captured_pieces",
+    "get_logger",
     "notation_to_coords",
     "play_match",
     "print_board",
@@ -61,6 +70,7 @@ __all__ = [
     "run_series",
     "run_uci_server",
     "run_web_server",
+    "setup_logging",
     "square_notation",
     "to_fen",
     "to_uci",
@@ -69,7 +79,14 @@ __all__ = [
 __version__ = "0.1.0"
 
 
+# Lazily-imported attributes. ``web`` (FastAPI/uvicorn) and the other heavy
+# modules are only imported on first attribute access, so a plain
+# ``import chess`` stays dependency-free at import time.
 def __getattr__(name: str) -> object:
+    if name in ("LogEntry", "LogRing", "get_logger", "setup_logging"):
+        from . import log
+
+        return getattr(log, name)
     if name in (
         "MatchResult",
         "SeriesResult",

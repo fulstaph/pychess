@@ -39,7 +39,6 @@ to the built-in minimax instead of failing the request.
 """
 
 import argparse
-import logging
 import socket
 import sys
 import webbrowser
@@ -55,13 +54,14 @@ from pydantic import BaseModel, Field
 from .engine import choose_move, evaluate
 from .game import ChessGame, from_fen
 from .helpers import square_notation
+from .log import get_logger, setup_logging
 from .move import Move
 from .stockfish import Stockfish, find_stockfish
 from .tui import get_captured_pieces
 from .uci import to_uci
 from .ui import get_html
 
-logger = logging.getLogger("chess.web")
+logger = get_logger("web")
 
 
 @dataclass
@@ -337,10 +337,7 @@ def run_web_server(
     """Start local web chessboard UI server and open in browser."""
     # Configure logging once at the process entry point so both uvicorn's
     # own records and chess.web records share one consistent format.
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    setup_logging()
 
     actual_port = _find_free_port(host, port)
     url = f"http://{host}:{actual_port}"

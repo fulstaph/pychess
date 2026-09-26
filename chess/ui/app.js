@@ -1,5 +1,9 @@
 import { Chessground } from 'https://cdn.jsdelivr.net/npm/@lichess-org/chessground/+esm';
 
+// ---------------------------------------------------------------------------
+// Module state: the Chessground board instance, the last /api/state payload,
+// a deferred promotion awaiting a piece choice, and current orientation.
+// ---------------------------------------------------------------------------
 let ground = null;
 let currentState = null;
 let pendingPromotion = null;
@@ -23,14 +27,19 @@ function playBeep(freq, type = 'sine', duration = 0.08) {
 
 const GLYPHS = { p: '♟', r: '♜', n: '♞', b: '♝', q: '♛', k: '♚' };
 
+// State polling: fetchState pulls /api/state and pushes it through updateUI.
 export async function fetchState() {
   const res = await fetch('/api/state');
   const data = await res.json();
   updateUI(data);
 }
 
+// Board init + full UI refresh: creates the Chessground board on first call,
+// then re-syncs FEN/orientation/movable state afterwards.
 export function updateUI(data) {
   currentState = data;
+  // Legal-move highlighting: server dests maps each origin square to
+  // its list of legal destinations, consumed by Chessground's movable.
   const destsMap = new Map();
   if (data.dests) {
     for (const [from, toList] of Object.entries(data.dests)) {
@@ -44,6 +53,8 @@ export function updateUI(data) {
     aiMode === 'human' ||
     data.turn === (boardOrientation === 'white' ? 'w' : 'b');
 
+  // The human may drag only on their own turn (pass & play, or the
+  // board oriented toward the side to move); otherwise moves are locked.
   if (!ground) {
     const wrap = document.getElementById('cg-board');
     ground = Chessground(wrap, {
@@ -118,6 +129,9 @@ export function updateUI(data) {
   document.getElementById('fen-input').value = data.fen;
 }
 
+// Promotion detection via a UCI probe: if "<orig><dest>q" appears in
+// legal_moves the drag was a pawn promotion, so open the choice dialog
+// instead of submitting the move directly.
 export async function onMovePiece(orig, dest) {
   // Check for pawn promotion by verifying if promoting with 'q' is a legal move
   const isPromotion =
@@ -146,6 +160,8 @@ export async function onMovePiece(orig, dest) {
   await submitMove(orig + dest);
 }
 
+// Move submission: POST /api/move with the mode's AI reply, depth, and
+// Stockfish flag; refreshes state (or re-syncs after a server error).
 export async function submitMove(moveStr) {
   const mode = document.getElementById('ai-mode').value;
   const aiReply = mode !== 'human';
@@ -174,7 +190,7 @@ export async function submitMove(moveStr) {
   }
 }
 
-// Attach event listeners
+// Event listeners: promotion dialog, and the undo/flip/ai/new/FEN controls.
 document.querySelectorAll('.promo-btn').forEach((btn) => {
   btn.addEventListener('click', async () => {
     document.getElementById('promo-modal').style.display = 'none';
