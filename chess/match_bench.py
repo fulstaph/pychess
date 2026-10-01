@@ -127,7 +127,7 @@ def _stockfish_version(path: str) -> str | None:
             text=True,
             timeout=5,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError, subprocess.TimeoutExpired:
         return None
     output = (result.stdout or result.stderr).strip()
     if result.returncode != 0 or not output:

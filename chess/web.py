@@ -656,7 +656,7 @@ def run_web_server(
             port=actual_port,
             log_level="warning",
         )
-    except (KeyboardInterrupt, EOFError):
+    except KeyboardInterrupt, EOFError:
         print("\nShutting down web server...")
         logger.info("Server stopped")
 

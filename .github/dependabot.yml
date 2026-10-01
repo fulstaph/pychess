@@ -11,10 +11,6 @@ updates:
       prefix: "chore"
       include: "scope"
     ignore:
-      # Ruff 0.15.0-0.16.9 reformats py314 code differently (see the ruff
-      # pin comment in pyproject.toml); stay on 0.14.x until that is resolved.
-      - dependency-name: "ruff"
-        versions: [">=0.15"]
       # pytest is pinned to 8.x in pyproject.toml.
       - dependency-name: "pytest"
         update-types: ["version-update:semver-major"]
