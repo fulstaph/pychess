@@ -18,8 +18,11 @@
 # This lesson explores how the package turns possible piece movements into legal game moves. We will inspect generated `Move` values, update game state, see how attacks constrain moves, and exercise castling, en passant, promotion, checkmate, and stalemate. Each scenario starts with a fresh game.
 
 # %%
+from copy import deepcopy
+
 from chess import Board, ChessGame, GameStatus, Piece, PieceType, notation_to_coords
 from chess.attacks import is_in_check
+from chess.engine import move_notation
 
 sq = notation_to_coords
 
@@ -167,7 +170,36 @@ print('Chosen piece on a8:', promotion_game.board.get(sq('a8')))
 # %% [markdown]
 # ## Checkmate, stalemate, and draws
 #
-# Checkmate means the side to move is in check and has no legal moves. Stalemate means it has no legal moves but is not in check. In this package, `is_draw()` recognizes stalemate only; repetition, the 50-move rule, and insufficient material are not implemented.
+# Checkmate is a win; stalemate is a draw. `is_draw()` also recognizes the
+# 50-move threshold, threefold repetition, and insufficient material.
+# This implementation treats the 50-move and threefold thresholds as draws
+# immediately; it does not model FIDE's claim workflow or 75-move/fivefold
+# automatic-draw distinction. Rule draws do not change `GameStatus`.
+#
+# **Predict, then run:** which draw reason applies to each of these positions?
+#
+# %%
+fifty_move_game = ChessGame.from_fen(
+    'k7/8/8/8/8/8/8/7K w - - 100 51'
+)
+insufficient_game = ChessGame.from_fen(
+    'k7/8/8/8/8/8/8/7K w - - 0 1'
+)
+repetition_game = ChessGame()
+for _ in range(2):
+    for notation in ('g1f3', 'g8f6', 'f3g1', 'f6g8'):
+        repetition_game.make_move(notation)
+
+assert fifty_move_game.is_fifty_moves()
+assert fifty_move_game.draw_reason() == 'fifty-move rule'
+assert insufficient_game.is_insufficient_material()
+assert insufficient_game.draw_reason() == 'insufficient material'
+assert repetition_game.is_threefold_repetition()
+assert repetition_game.draw_reason() == 'threefold repetition'
+print('100 halfmoves:', fifty_move_game.draw_reason())
+print('Bare kings:', insufficient_game.draw_reason())
+print('Repeated start position:', repetition_game.draw_reason())
+print('Draw status remains separate:', repetition_game.status)
 
 # %%
 mate_game = ChessGame()
@@ -193,12 +225,69 @@ print('Black to move:', stalemate_game.turn)
 print('Stalemate:', stalemate_game.status)
 print('Recognized as draw:', stalemate_game.is_draw())
 
+
+# %% [markdown]
+# ## Perft: verifying move generation by counting
+#
+# Perft (Performance Test) counts legal move paths ending at a fixed depth. The [Chess Programming Wiki](https://www.chessprogramming.org/Perft) documents the algorithm and published results. Matching canonical counts across several positions and depths gives strong confidence in move generation, but does not prove correctness for every position.
+#
+# **Perft Divide** reports the leaf count for each root move, isolating a bug to one branch. See the [Perft Results](https://www.chessprogramming.org/Perft_Results) page for canonical values.
+
+# %%
+
+def perft(game: ChessGame, depth: int) -> int:
+    if depth == 0:
+        return 1
+    nodes = 0
+    for move in game.legal_moves():
+        branch = deepcopy(game)
+        branch.make_move(move)
+        nodes += perft(branch, depth - 1)
+    return nodes
+
+def perft_divide(game: ChessGame, depth: int) -> dict[str, int]:
+    results = {}
+    for move in game.legal_moves():
+        branch = deepcopy(game)
+        branch.make_move(move)
+        results[move_notation(move)] = perft(branch, depth - 1)
+    return results
+
+game = ChessGame()
+# CPW canonical counts for the starting position
+assert perft(game, 1) == 20
+assert perft(game, 2) == 400
+print('Depth 1:', perft(game, 1))
+print('Depth 2:', perft(game, 2))
+
+# %%
+divide_result = perft_divide(ChessGame(), 1)
+for mv, count in sorted(divide_result.items()):
+    print(f'  {mv}: {count}')
+print(f'Total moves: {sum(divide_result.values())}')
+assert sum(divide_result.values()) == 20
+
+# %% [markdown]
+# **Predict, then run:** [Kiwipete](https://www.chessprogramming.org/Perft_Results) is a tricky CPW test position that exercises castling, en passant, and promotions. How many legal moves does White have?
+
+# %%
+kiwipete = ChessGame.from_fen(
+    'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -'
+)
+kiwipete_depth1 = perft(kiwipete, 1)
+assert kiwipete_depth1 == 48
+print(f'Kiwipete depth 1: {kiwipete_depth1} (expected 48)')
+
+# %% [markdown]
+# If any count disagrees with the reference, `perft_divide` at that depth isolates which root move is wrong — then recurse into that branch at depth-1.
+
 # %% [markdown]
 # ## Takeaways
 #
 # - A generated `Move` carries capture and special-move metadata.
 # - `ChessGame` filters geometrically possible moves so they cannot leave your king in check, and commits state when a move is made.
 # - Castling rights, en-passant timing, and promotion choice are part of legal game state.
-# - Checkmate is a win; stalemate is the only draw condition currently implemented.
+# - `is_draw()` recognizes stalemate, the 50-move threshold, threefold repetition, and insufficient material; its claim semantics are simplified.
+# - Perft is the standard correctness test for move generators: recursive leaf counts must match published reference values.
 #
 # Next: [Engine decisions](03_engine_decisions.ipynb).

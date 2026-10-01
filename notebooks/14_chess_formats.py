@@ -1,0 +1,124 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.5
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # 14. Chess position and game formats
+#
+# **Learning goals:** round-trip a position through all six FEN fields, distinguish coordinate moves from SAN input, observe SAN disambiguation and check suffixes, and export a game using the repository's PGN-like formatter while understanding format limits.
+#
+# Text formats are interfaces for representing chess state and history. They are not interchangeable: a position snapshot cannot recover the path that led there, and a move string has meaning only relative to a position.
+#
+# Sources: [CPW Forsyth-Edwards Notation](https://www.chessprogramming.org/Forsyth-Edwards_Notation), [CPW Standard Algebraic Notation](https://www.chessprogramming.org/Algebraic_Chess_Notation), [CPW Portable Game Notation](https://www.chessprogramming.org/Portable_Game_Notation)
+# %%
+from chess import ChessGame, notation_to_coords
+from chess.engine import move_notation
+from chess.tui import format_pgn
+
+# %% [markdown]
+# ## FEN: six fields, one position snapshot
+#
+# FEN fields are piece placement, active color, castling availability, en-passant target, halfmove clock, and fullmove number. The counters matter: the halfmove clock informs the fifty-move rule, while the fullmove number is notation context. Rights and en-passant state may affect legal moves even if the piece diagram is identical.
+#
+# This project's `ChessGame.from_fen` accepts incomplete field sets and fills defaults; `to_fen` emits all six in normalized order. Parsing enforces repository validation, not every canonicalization policy or historical consistency check a full FEN ecosystem may expect. In particular, FEN describes current rule state, not the complete move history needed to establish repetition claims.
+# %%
+fen = 'r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 42'
+game = ChessGame.from_fen(fen)
+serialized = game.to_fen()
+fields = serialized.split()
+assert len(fields) == 6
+assert fields[1:] == ['w', 'KQkq', 'd6', '0', '42']
+restored = ChessGame.from_fen(serialized)
+assert restored.to_fen() == serialized
+assert restored.legal_moves() == game.legal_moves()
+print('Normalized FEN:', serialized)
+print(
+    'fields:',
+    dict(
+        zip(
+            ('placement', 'turn', 'castling', 'en_passant', 'halfmove', 'fullmove'),
+            fields,
+            strict=True,
+        )
+    ),
+)
+
+# A position reached by a move can have an en-passant field even though
+# no capture is available; its presence is temporal rule state.
+after_double_push = ChessGame()
+after_double_push.make_move('e2e4')
+assert after_double_push.to_fen().split()[3] == 'e3'
+print('After e2e4 en-passant field:', after_double_push.to_fen().split()[3])
+
+# %% [markdown]
+# ## Coordinate moves and SAN are different languages
+#
+# The game parser accepts coordinate notation such as `e2e4` and SAN such as `Nf3`; both are interpreted against the current legal moves. Coordinate notation identifies origin and destination (with promotion suffix when needed). SAN is compact human notation: piece letter, capture marker, destination, optional disambiguation, promotion, and check/mate suffix. A valid suffix is checked against the resulting position. Omit a suffix when you do not know the result; do not assume every coordinate move is SAN.
+#
+# When two same-type pieces can reach one destination, SAN disambiguates with file, rank, or the full origin square as necessary. This position has knights on c3 and g3 both able to reach e4; `Nce4` and `Nge4` identify the chosen knight.
+# %%
+coordinate_game = ChessGame()
+coordinate_move = coordinate_game.make_move('e2e4')
+assert move_notation(coordinate_move) == 'e2e4'
+
+san_game = ChessGame()
+san_game.make_move('e4')
+san_game.make_move('e5')
+san_game.make_move('Nf3')
+assert san_game.turn == 'b'
+
+ambiguous = ChessGame.from_fen('4k3/8/8/8/8/2N3N1/8/4K3 w - - 0 1')
+ambiguous.make_move('Nce4')
+assert ambiguous.board.get(notation_to_coords('e4')) is not None
+print('Coordinate e2e4 ->', move_notation(coordinate_move))
+print('SAN sequence accepted: 1. e4 e5 2. Nf3')
+print('Disambiguated SAN Nce4 accepted from c3')
+
+# Check suffix validation: Fool's Mate ends with a correctly suffixed #.
+mating = ChessGame()
+for move_text in ('f3', 'e5', 'g4'):
+    mating.make_move(move_text)
+mating_move = mating.make_move('Qh4#')
+assert mating.is_checkmate()
+assert move_notation(mating_move) == 'd8h4'
+print('Qh4# accepted and checkmate confirmed')
+
+# %% [markdown]
+# ## Exporting a played game
+#
+# The repository provides `chess.tui.format_pgn(moves, white_name, black_name, result)`. Its implementation emits five tag pairs and move text grouped into move numbers, but its move tokens are **coordinate notation**, not standard SAN. Treat the output as a useful project-specific game log/PGN-like export, not a standards-complete PGN writer or parser: it does not preserve arbitrary tags, comments, variations, clocks, or a starting FEN. Full PGN interoperability has broader rules and metadata requirements.
+# %%
+export_game = ChessGame()
+move_history = [
+    export_game.make_move(text)
+    for text in ('e4', 'e5', 'Nf3', 'Nc6', 'Bb5')
+]
+pgn_text = format_pgn(move_history, white_name='Ada', black_name='Turing')
+assert '[White "Ada"]' in pgn_text and '[Black "Turing"]' in pgn_text
+assert '1. e2e4 e7e5' in pgn_text
+assert '3. f1b5' in pgn_text
+print(pgn_text)
+
+# %% [markdown]
+# ## Text is not canonical position identity
+#
+# A FEN can represent the same board arrangement with different counters or rights, and those differences can change future legal moves or draw claims. Conversely, distinct histories can converge to the same current rule state. SAN tokens are contextual: `Nf3` cannot be interpreted without knowing which position is active, and alternate legal histories need not have the same spelling sequence. Use a carefully defined position key for position comparison, and retain move history separately when repetition or game-record reconstruction matters.
+#
+# ## Takeaways
+#
+# - FEN snapshots current board and selected rule state; it is not a full game record.
+# - Coordinate moves and SAN have different purposes; SAN disambiguation/check suffixes depend on legal context.
+# - The shipped formatter is useful, but its coordinate move text is not standards-complete SAN PGN.
+# - Notation is a representation, not a universal identity function for chess positions or histories.
+#
+# Next: [UCI protocol](15_uci_protocol.ipynb) covers engine-to-GUI communication.

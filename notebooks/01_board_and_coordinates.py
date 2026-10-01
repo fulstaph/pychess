@@ -93,11 +93,57 @@ print('Source board: e2 =', pawn_board.get(sq('e2')), ', e4 =', pawn_board.get(s
 print('Returned board: e2 =', moved_board.get(sq('e2')), ', e4 =', moved_board.get(sq('e4')))
 
 # %% [markdown]
+# ## Where does this board fit? Representation families
+#
+# Our `Board` is one of several classic ways to encode a chess position. The [Chess Programming Wiki](https://www.chessprogramming.org/Board_Representation) catalogues three main families:
+#
+# - **Mailbox / Array** — Our `Board` is a pure-Python 2D mailbox: `tuple[tuple[Piece | None, ...], ...]`. Simple, readable, O(1) square lookup. The 10x12 padded variant uses sentinel squares to simplify edge handling.
+# - **0x88** — Uses a 128-element array where `square & 0x88` instantly detects off-board indices. Compact coordinate math.
+# - **Bitboards** — 64-bit integers where each bit = one square. Modern engines (Stockfish) use these for parallel set operations on entire piece armies. Python's arbitrary-precision `int` can represent them.
+#
+# | Approach | Data Structure | Edge Detection | Typical Use |
+# | --- | --- | --- | --- |
+# | Mailbox (8x8) | 2D array / tuple-of-tuples | Bounds check per axis | Teaching engines, simple bots |
+# | Mailbox (10x12) | 1D padded array | Sentinel squares | Classic C engines |
+# | 0x88 | 128-element array | `index & 0x88` | Compact C/C++ engines |
+# | Bitboards | 64-bit integers (one per color/piece) | Bit masking | Stockfish, modern top engines |
+
+# %%
+# A bitboard is a 64-bit integer: bit i represents square i (a1=0, h8=63).
+# Rank 2 (white pawns' home) occupies bits 8-15.
+white_pawns_bb = 0xFF00  # bits 8..15 set
+assert white_pawns_bb.bit_count() == 8
+# Our mailbox board stores the same info differently:
+starting_board = Board.from_notation()
+pawn_count = sum(
+    starting_board.get((row, col)) == Piece(PieceType.PAWN, 'w')
+    for row in range(8) for col in range(8)
+)
+assert pawn_count == 8
+print(f'Bitboard (binary): {white_pawns_bb:064b}')
+print(f'Bitboard (hex):    0x{white_pawns_bb:016X}')
+print(f'Mailbox pawn count: {pawn_count}')
+
+# %%
+# 0x88: valid squares have indices 0x00..0x77 where nibbles are 0-7.
+# Stepping off the board sets bit 3 or 7, caught by & 0x88.
+def sq_0x88(row: int, col: int) -> int:
+    return (row << 4) | col
+
+assert sq_0x88(0, 0) & 0x88 == 0   # a8 — valid
+assert sq_0x88(7, 7) & 0x88 == 0   # h1 — valid
+assert sq_0x88(7, 8) & 0x88 != 0   # one step right of h1 — invalid!
+print('a8 on board:', sq_0x88(0, 0) & 0x88 == 0)
+print('h1 on board:', sq_0x88(7, 7) & 0x88 == 0)
+print('past h1 on board:', sq_0x88(7, 8) & 0x88 == 0)
+
+# %% [markdown]
 # ## Takeaways
 #
 # - A square is stored as `(row, column)`; ranks run opposite to matrix row numbers.
 # - `Board.from_notation()` creates the familiar 32-piece starting position, while `Board()` is empty.
 # - `with_piece()` and `Move.execute()` return new boards, preserving the source snapshot.
 # - Board transitions and complete game rules are separate: legal play belongs to `ChessGame`.
+# - Board representations range from simple mailbox arrays (like ours) to bitwise integers; each trades readability for speed.
 #
 # Next: [Moves and rules](02_moves_and_rules.ipynb).
