@@ -1,11 +1,14 @@
 import { Chessground } from 'https://cdn.jsdelivr.net/npm/@lichess-org/chessground/+esm';
 
 // ---------------------------------------------------------------------------
-// Module state: the Chessground board instance, the last /api/state payload,
-// a deferred promotion awaiting a piece choice, and current orientation.
+// Module state: the Chessground board instance, the last state payload,
+// the active session id (persisted in localStorage so a reload returns to
+// the same game), a deferred promotion awaiting a piece choice, and the
+// current orientation.
 // ---------------------------------------------------------------------------
 let ground = null;
 let currentState = null;
+let currentSessionId = null;
 let pendingPromotion = null;
 let boardOrientation = 'white';
 
@@ -27,21 +30,61 @@ function playBeep(freq, type = 'sine', duration = 0.08) {
 
 const GLYPHS = { p: '♟', r: '♜', n: '♞', b: '♝', q: '♛', k: '♚' };
 
-// State polling: fetchState pulls /api/state and pushes it through updateUI.
+// Remember the active session id across reloads.
+function saveSessionId() {
+  try {
+    if (currentSessionId !== null) localStorage.setItem('pychess-session', String(currentSessionId));
+  } catch {
+    // Storage unavailable (private mode); the id simply won't persist.
+  }
+}
+
+function loadStoredSessionId() {
+  try {
+    const raw = localStorage.getItem('pychess-session');
+    return raw ? Number(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+// State polling: fetchState pulls the active session's state and pushes it
+// through updateUI.
 export async function fetchState() {
-  const res = await fetch('/api/state');
+  if (currentSessionId === null) return;
+  try {
+    const res = await fetch(`/api/sessions/${currentSessionId}`);
+    if (!res.ok) return;
+    updateUI(await res.json());
+  } catch {
+    // Server unreachable; keep the last known board state.
+  }
+}
+
+// Send JSON and return the parsed body; throws Error(server detail) on !ok.
+export async function sendJSON(path, body, method = 'POST') {
+  const res = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
   const data = await res.json();
-  updateUI(data);
+  if (!res.ok) {
+    const detail = typeof data.detail === 'string' ? data.detail : res.statusText;
+    throw new Error(detail);
+  }
+  return data;
 }
 
 // Board init + full UI refresh: creates the Chessground board on first call,
 // then re-syncs FEN/orientation/movable state afterwards.
 export function updateUI(data) {
   currentState = data;
+  const gameOver = Boolean(data.is_checkmate || data.is_draw);
   // Legal-move highlighting: server dests maps each origin square to
   // its list of legal destinations, consumed by Chessground's movable.
   const destsMap = new Map();
-  if (data.dests) {
+  if (!gameOver && data.dests) {
     for (const [from, toList] of Object.entries(data.dests)) {
       destsMap.set(from, toList);
     }
@@ -50,8 +93,9 @@ export function updateUI(data) {
   const turnColor = data.turn === 'w' ? 'white' : 'black';
   const aiMode = document.getElementById('ai-mode').value;
   const isHumanTurn =
-    aiMode === 'human' ||
-    data.turn === (boardOrientation === 'white' ? 'w' : 'b');
+    !gameOver &&
+    (aiMode === 'human' ||
+      data.turn === (boardOrientation === 'white' ? 'w' : 'b'));
 
   // The human may drag only on their own turn (pass & play, or the
   // board oriented toward the side to move); otherwise moves are locked.
@@ -88,11 +132,12 @@ export function updateUI(data) {
   if (data.is_checkmate) {
     stateCard.classList.add('status-mate');
     document.getElementById('state-text').textContent = 'CHECKMATE';
+  } else if (data.is_draw) {
+    stateCard.classList.add('status-draw');
+    document.getElementById('state-text').textContent = 'DRAW';
   } else if (data.is_check) {
     stateCard.classList.add('status-check');
     document.getElementById('state-text').textContent = 'CHECK';
-  } else if (data.is_draw) {
-    document.getElementById('state-text').textContent = 'DRAW';
   } else {
     document.getElementById('state-text').textContent = 'ACTIVE';
   }
@@ -129,6 +174,82 @@ export function updateUI(data) {
   document.getElementById('fen-input').value = data.fen;
 }
 
+// Refresh the Sessions dropdown from GET /api/sessions; preserves the
+// current selection when its id is still present.
+export async function refreshSessions() {
+  const select = document.getElementById('sessions-select');
+  if (!select) return;
+  let sessions = [];
+  try {
+    const res = await fetch('/api/sessions');
+    if (res.ok) sessions = await res.json();
+  } catch {
+    return;
+  }
+  const prev = currentSessionId !== null ? String(currentSessionId) : '';
+  select.innerHTML = '';
+  for (const s of sessions) {
+    const opt = document.createElement('option');
+    opt.value = String(s.id);
+    opt.textContent = `#${s.id} ${s.name || ''} (${s.move_count} plies)`;
+    select.appendChild(opt);
+  }
+  if (prev && sessions.some((s) => String(s.id) === prev)) select.value = prev;
+}
+
+// Switch to another session from the dropdown: remember it and fetch state.
+document.getElementById('sessions-select').onchange = async (e) => {
+  const id = e.target.value;
+  if (!id) return;
+  currentSessionId = Number(id);
+  saveSessionId();
+  try {
+    const data = await sendJSON(`/api/sessions/${currentSessionId}`, {}, 'GET');
+    updateUI(data);
+  } catch (err) {
+    alert(err.message);
+    fetchState();
+  }
+};
+
+// New session: POST /api/sessions (standard start), then switch to it.
+document.getElementById('btn-new').onclick = async () => {
+  try {
+    const data = await sendJSON('/api/sessions', {});
+    currentSessionId = data.id;
+    saveSessionId();
+    updateUI(data);
+    refreshSessions();
+  } catch (err) {
+    alert(err.message);
+    fetchState();
+  }
+};
+
+// Delete the active session; switches to another one when the server
+// still has any.
+document.getElementById('btn-session-delete').onclick = async () => {
+  if (currentSessionId === null) return;
+  if (!confirm(`Delete session #${currentSessionId}?`)) return;
+  try {
+    await sendJSON(`/api/sessions/${currentSessionId}`, {}, 'DELETE');
+  } catch (err) {
+    alert(err.message);
+    refreshSessions();
+    return;
+  }
+  currentSessionId = null;
+  saveSessionId();
+  refreshSessions().then(() => {
+    const select = document.getElementById('sessions-select');
+    if (select.value) {
+      currentSessionId = Number(select.value);
+      saveSessionId();
+      fetchState();
+    }
+  });
+};
+
 // Promotion detection via a UCI probe: if "<orig><dest>q" appears in
 // legal_moves the drag was a pawn promotion, so open the choice dialog
 // instead of submitting the move directly.
@@ -160,37 +281,28 @@ export async function onMovePiece(orig, dest) {
   await submitMove(orig + dest);
 }
 
-// Move submission: POST /api/move with the mode's AI reply, depth, and
-// Stockfish flag; refreshes state (or re-syncs after a server error).
+// Move submission: POST the move to the active session with the mode's AI
+// reply, depth, and Stockfish flag; on server error, alert the detail and
+// re-sync state.
 export async function submitMove(moveStr) {
   const mode = document.getElementById('ai-mode').value;
-  const aiReply = mode !== 'human';
-  const depth = mode === 'minimax-1' ? 1 : 2;
-  const useSf = mode === 'stockfish';
-
   playBeep(220, 'triangle', 0.05);
-
-  const res = await fetch('/api/move', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  try {
+    const data = await sendJSON(`/api/sessions/${currentSessionId}/move`, {
       move: moveStr,
-      ai_reply: aiReply,
-      depth: depth,
-      stockfish: useSf,
-    }),
-  });
-  const data = await res.json();
-  if (data.error) {
-    alert(data.error);
-    fetchState();
-  } else {
+      ai_reply: mode !== 'human',
+      depth: mode === 'minimax-1' ? 1 : 2,
+      stockfish: mode === 'stockfish',
+    });
     if (data.is_check) playBeep(520, 'sine', 0.12);
     updateUI(data);
+  } catch (err) {
+    alert(err.message);
+    fetchState();
   }
 }
 
-// Event listeners: promotion dialog, and the undo/flip/ai/new/FEN controls.
+// Event listeners: promotion dialog, and the undo/flip/ai/FEN controls.
 document.querySelectorAll('.promo-btn').forEach((btn) => {
   btn.addEventListener('click', async () => {
     document.getElementById('promo-modal').style.display = 'none';
@@ -214,12 +326,15 @@ document.getElementById('promo-modal').addEventListener('click', (e) => {
 
 document.getElementById('btn-undo').onclick = async () => {
   const mode = document.getElementById('ai-mode').value;
-  const res = await fetch('/api/undo', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ steps: mode === 'human' ? 1 : 2 }),
-  });
-  updateUI(await res.json());
+  try {
+    const data = await sendJSON(`/api/sessions/${currentSessionId}/undo`, {
+      steps: mode === 'human' ? 1 : 2,
+    });
+    updateUI(data);
+  } catch (err) {
+    alert(err.message);
+    fetchState();
+  }
 };
 
 document.getElementById('btn-flip').onclick = () => {
@@ -227,35 +342,64 @@ document.getElementById('btn-flip').onclick = () => {
   if (ground) ground.set({ orientation: boardOrientation });
 };
 
-document.getElementById('btn-new').onclick = async () => {
-  const res = await fetch('/api/reset', { method: 'POST' });
-  updateUI(await res.json());
-};
-
 document.getElementById('btn-ai').onclick = async () => {
   const mode = document.getElementById('ai-mode').value;
   const depth = mode === 'minimax-1' ? 1 : 2;
   const useSf = mode === 'stockfish';
-  const res = await fetch('/api/ai_move', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ depth, stockfish: useSf }),
-  });
-  updateUI(await res.json());
+  try {
+    const data = await sendJSON(`/api/sessions/${currentSessionId}/ai_move`, {
+      depth,
+      stockfish: useSf,
+    });
+    updateUI(data);
+  } catch (err) {
+    alert(err.message);
+    fetchState();
+  }
 };
 
 document.getElementById('fen-input').onchange = async (e) => {
   const fen = e.target.value.trim();
   if (!fen) return;
-  const res = await fetch('/api/reset', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fen }),
-  });
-  const data = await res.json();
-  if (data.error) alert(data.error);
-  else updateUI(data);
+  try {
+    const data = await sendJSON(`/api/sessions/${currentSessionId}/reset`, { fen });
+    updateUI(data);
+  } catch (err) {
+    alert(err.message);
+    fetchState();
+  }
 };
 
-// Initial load
-fetchState();
+// Initial load: list sessions, restore the stored id when it still exists,
+// otherwise create a fresh session; then fetch the active state.
+(async () => {
+  await refreshSessions();
+  const select = document.getElementById('sessions-select');
+  const stored = loadStoredSessionId();
+  if (stored !== null && sessionsHaveId(stored)) {
+    currentSessionId = stored;
+  } else if (select.value) {
+    currentSessionId = Number(select.value);
+  } else {
+    try {
+      const data = await sendJSON('/api/sessions', {});
+      currentSessionId = data.id;
+      await refreshSessions();
+    } catch (err) {
+      console.error('Failed to create a session', err);
+      return;
+    }
+  }
+  saveSessionId();
+  select.value = String(currentSessionId);
+  fetchState();
+
+  async function sessionsHaveId(id) {
+    try {
+      const res = await fetch(`/api/sessions/${id}`);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+})();

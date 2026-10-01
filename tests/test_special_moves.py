@@ -167,7 +167,10 @@ def test_fifty_move_rule_draw_and_resets():
     assert game.halfmove_clock == 100
     assert game.is_fifty_moves()
     assert game.is_draw()
-    assert game.status == GameStatus.STALEMATE
+    assert game.draw_reason() == "fifty-move rule"
+    assert not game.is_stalemate()
+    assert game.status == GameStatus.ACTIVE
+    assert game.legal_moves()
 
     # Pawn move resets halfmove clock
     pawn_game = ChessGame(halfmove_clock=50)
@@ -186,6 +189,22 @@ def test_fifty_move_rule_draw_and_resets():
     assert capture_game.halfmove_clock == 0
 
 
+def test_check_on_the_fifty_move_boundary_keeps_the_check_suffix():
+    board = position(
+        ("a1", PieceType.KING, "w"),
+        ("a7", PieceType.ROOK, "w"),
+        ("h8", PieceType.KING, "b"),
+    )
+    game = ChessGame(board, turn="w", halfmove_clock=99)
+    game.make_move("a7h7+")
+    assert game.is_check()
+    assert game.is_fifty_moves()
+    assert game.is_draw()
+    assert not game.is_stalemate()
+    assert game.status == GameStatus.CHECK
+    assert game.legal_moves()
+
+
 def test_threefold_repetition_draw():
     game = ChessGame()
     moves = ["Nf3", "Nf6", "Ng1", "Ng8", "Nf3", "Nf6", "Ng1", "Ng8"]
@@ -194,7 +213,10 @@ def test_threefold_repetition_draw():
 
     assert game.is_threefold_repetition()
     assert game.is_draw()
-    assert game.status == GameStatus.STALEMATE
+    assert game.draw_reason() == "threefold repetition"
+    assert not game.is_stalemate()
+    assert game.status == GameStatus.ACTIVE
+    assert game.legal_moves()
 
     # Test after() also triggers threefold repetition
     game2 = ChessGame()
@@ -203,7 +225,40 @@ def test_threefold_repetition_draw():
     assert not game2.is_threefold_repetition()
     game2 = game2.after(moves[-1])
     assert game2.is_threefold_repetition()
-    assert game2.status == GameStatus.STALEMATE
+    assert game2.is_draw()
+    assert not game2.is_stalemate()
+
+
+def test_threefold_repetition_ignores_unusable_en_passant_rights():
+    pinned_ep = ChessGame.from_fen("k3r1n1/8/8/3pP3/8/8/8/4K1N1 w - d6 0 2")
+    assert pinned_ep.to_fen().split()[3] == "d6"
+    assert not any(move.special == "en_passant" for move in pinned_ep.legal_moves())
+
+    cycle = ("Nf3", "Nf6", "Ng1", "Ng8")
+    for _ in range(2):
+        for move in cycle:
+            pinned_ep.make_move(move)
+
+    assert pinned_ep.is_threefold_repetition()
+    assert pinned_ep.draw_reason() == "threefold repetition"
+
+    legal_ep = ChessGame.from_fen("4k1n1/8/8/3pP3/8/8/8/4K1N1 w - d6 0 2")
+    assert any(move.special == "en_passant" for move in legal_ep.legal_moves())
+    for _ in range(2):
+        for move in cycle:
+            legal_ep.make_move(move)
+    assert not legal_ep.is_threefold_repetition()
+
+
+def test_unusable_en_passant_repetition_is_tracked_by_after():
+    game = ChessGame.from_fen("4k1n1/8/8/3p4/8/8/8/4K1N1 w - d6 0 2")
+    cycle = ("Nf3", "Nf6", "Ng1", "Ng8")
+    for _ in range(2):
+        for move in cycle:
+            game = game.after(move)
+
+    assert game.is_threefold_repetition()
+    assert game.draw_reason() == "threefold repetition"
 
 
 def test_insufficient_material_draw_variations():
@@ -211,7 +266,11 @@ def test_insufficient_material_draw_variations():
     kvk = position(("e1", PieceType.KING, "w"), ("e8", PieceType.KING, "b"))
     game_kvk = ChessGame(kvk)
     assert game_kvk.is_insufficient_material()
-    assert game_kvk.status == GameStatus.STALEMATE
+    assert game_kvk.is_draw()
+    assert game_kvk.draw_reason() == "insufficient material"
+    assert not game_kvk.is_stalemate()
+    assert game_kvk.status == GameStatus.ACTIVE
+    assert game_kvk.legal_moves()
 
     # K+N vs K
     knvk = position(

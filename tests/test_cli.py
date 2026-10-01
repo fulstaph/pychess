@@ -2,6 +2,9 @@ import os
 import subprocess
 import sys
 
+from chess import ChessGame
+from chess.engine import move_notation
+
 
 def run_cli(
     inputs: str, args: list[str] | None = None
@@ -16,19 +19,40 @@ def run_cli(
     )
 
 
+def assert_engine_move_is_legal(output: str, game: ChessGame) -> str:
+    moves = [
+        line.removeprefix("Engine: ")
+        for line in output.splitlines()
+        if line.startswith("Engine: ")
+    ]
+    assert len(moves) == 1
+    assert moves[0] in {move_notation(move) for move in game.legal_moves()}
+    return moves[0]
+
+
 def test_white_can_retry_invalid_move_without_losing_turn():
     result = run_cli("1\nnotamove\ne4\nq\n")
     assert result.returncode == 0, result.stderr
     assert "Invalid move" in result.stdout
     assert "e4" in result.stdout
-    assert "Engine: e7e5" in result.stdout
+    game = ChessGame()
+    game.make_move("e4")
+    assert_engine_move_is_legal(result.stdout, game)
     assert "Traceback" not in result.stderr
 
 
 def test_black_choice_makes_white_ai_move_first():
     result = run_cli("2\nq\n")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.index("Engine: d2d4") < result.stdout.index("Your move")
+    move = assert_engine_move_is_legal(result.stdout, ChessGame())
+    assert result.stdout.index(f"Engine: {move}") < result.stdout.index("Your move")
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_accepts_engine_search_depth_override():
+    result = run_cli("2\nq\n", args=["--depth", "1"])
+    assert result.returncode == 0, result.stderr
+    assert_engine_move_is_legal(result.stdout, ChessGame())
     assert "Traceback" not in result.stderr
 
 
@@ -49,11 +73,15 @@ def test_interactive_help_and_fen():
 
 
 def test_interactive_undo_command():
-    result = run_cli("1\ne4\nundo\nq\n")
+    result = run_cli("1\ne4\nundo\nfen\nq\n")
     assert result.returncode == 0, result.stderr
     assert "You played: e4" in result.stdout
-    assert "Engine: e7e5" in result.stdout
+    game = ChessGame()
+    game.make_move("e4")
+    assert_engine_move_is_legal(result.stdout, game)
     assert "Move undone." in result.stdout
+    start = "FEN: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    assert result.stdout.index("Move undone.") < result.stdout.index(start)
 
     result_empty = run_cli("1\nundo\nq\n")
     assert "No moves to undo." in result_empty.stdout

@@ -9,6 +9,7 @@ from chess import (
     PieceType,
     notation_to_coords,
 )
+from chess.engine import move_notation
 
 
 def sq(text):
@@ -98,3 +99,23 @@ def test_game_status_queries_and_init_validation():
         game.make_move(123)
     with pytest.raises(ValueError, match="Illegal move"):
         game.after(123)
+
+
+def test_king_safety_memo_is_reset_by_make_move_and_after():
+    game = ChessGame()
+    for move in ("e4", "f6", "Qh5+"):
+        # Warm the per-position memo, then advance: the child must not reuse it.
+        game.is_check()
+        game.legal_moves()
+        game.make_move(move)
+    assert game.is_check() is True
+    assert [move_notation(m) for m in game.legal_moves()] == ["g7g6"]
+    game.make_move("g6")
+    assert game.is_check() is False
+
+    parent = ChessGame()
+    assert parent.is_check() is False and len(parent.legal_moves()) == 20
+    child = parent.after("e4")
+    assert child.is_check() is False and len(child.legal_moves()) == 20
+    checked = child.after("f6").after("Qh5+")
+    assert checked.is_check() is True

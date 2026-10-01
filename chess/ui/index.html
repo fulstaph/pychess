@@ -77,6 +77,16 @@
         <h3>Move History</h3>
         <div id="moves-history" class="moves-box"></div>
       </div>
+      <!-- Sessions: list of persisted games with New/Delete controls;
+           switching sessions reloads that game's board state. -->
+
+      <div class="panel-section">
+        <h3>Sessions</h3>
+        <select id="sessions-select"></select>
+        <div class="btn-row">
+          <button id="btn-session-delete">Delete Session</button>
+        </div>
+      </div>
       <!-- Control buttons: undo (2 plies in AI modes), flip, AI move, reset -->
 
       <div class="panel-section btn-row">

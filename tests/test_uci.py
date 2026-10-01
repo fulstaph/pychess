@@ -18,6 +18,7 @@ from chess import (
     to_fen,
     to_uci,
 )
+from chess.engine import EngineConfig
 
 FAKE_ENGINE_SCRIPT = str(Path(__file__).parent / "fake_uci_engine.py")
 
@@ -175,6 +176,47 @@ def test_run_uci_server_in_memory():
     assert "uciok" in output
     assert "readyok" in output
     assert "bestmove" in output
+
+
+def test_uci_server_uses_configured_default_depth_and_quiescence():
+    out_stream = io.StringIO()
+    run_uci_server(
+        input_stream=io.StringIO("uci\nposition startpos\ngo\nquit\n"),
+        output_stream=out_stream,
+        engine_config=EngineConfig(search_depth=1, quiescence=False),
+    )
+    output = out_stream.getvalue()
+    assert "option name Depth type spin default 1 min 1 max 8" in output
+    assert "option name Quiescence type check default false" in output
+    assert "bestmove " in output
+
+
+def test_uci_server_survives_a_bad_fen_and_null_move():
+    commands = (
+        "position fen not-a-fen\n"
+        "isready\n"
+        "position fen rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3\n"
+        "go depth 1\n"
+        "quit\n"
+    )
+    out_stream = io.StringIO()
+    run_uci_server(input_stream=io.StringIO(commands), output_stream=out_stream)
+    output = out_stream.getvalue()
+    assert "readyok" in output
+    assert "bestmove 0000" in output
+
+
+def test_go_limits_clamp_depth_and_honor_clocks():
+    from chess.uci import _go_limits
+
+    assert _go_limits(["go", "depth", "99"], "w", 2) == (8, None)
+    assert _go_limits(["go", "depth", "0"], "w", 2) == (1, None)
+    assert _go_limits(["go"], "w", 2) == (2, None)
+    assert _go_limits(["go", "movetime", "100"], "b", 2) == (8, 100)
+    assert _go_limits(["go", "depth", "3", "movetime", "500"], "w", 2) == (3, 500)
+    depth, budget = _go_limits(["go", "wtime", "30000", "btime", "30000"], "w", 2)
+    assert depth == 8
+    assert budget == 1000
 
 
 def test_uci_server_as_subprocess_with_client():

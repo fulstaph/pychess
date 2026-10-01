@@ -50,8 +50,8 @@ class Move:
         ):
             logger.debug("execute failed: invalid special %r", self.special)
             raise ValueError("Invalid special move")
-        source = board.get(self.from_square)
-        target = board.get(self.to_square)
+        source = board._get_fast(self.from_square)
+        target = board._get_fast(self.to_square)
         if source != self.piece or self.from_square == self.to_square:
             logger.debug(
                 "execute failed: source mismatch for %s -> %s",
@@ -78,7 +78,7 @@ class Move:
             # rank of the moving pawn but on the *destination* file, i.e.
             # (from_row, to_col).  The landing square itself is empty.
             capture_square = (self.from_square[0], self.to_square[1])
-            captured = board.get(capture_square)
+            captured = board._get_fast(capture_square)
             if (
                 self.piece.type != PieceType.PAWN
                 or target is not None
@@ -118,10 +118,10 @@ class Move:
             row = self.from_square[0]
             rook_from = (row, 7 if self.special == "castle_k" else 0)
             rook_to = (row, 5 if self.special == "castle_k" else 3)
-            rook = board.get(rook_from)
+            rook = board._get_fast(rook_from)
             if (
                 rook != Piece(PieceType.ROOK, self.piece.color)
-                or board.get(rook_to) is not None
+                or board._get_fast(rook_to) is not None
             ):
                 logger.debug("execute failed: castling rook unavailable")
                 raise ValueError("Castling rook is unavailable")
@@ -154,7 +154,10 @@ class Move:
                 logger.debug("execute failed: unexpected promotion choice")
                 raise ValueError("Unexpected promotion choice")
             promoted = self.piece
+        if len(changes) == 1 and (target is None or target.type != PieceType.KING):
+            # Plain move or promotion: only source and destination change.
+            return board._moved(self.from_square, self.to_square, promoted)
         changes[self.to_square] = promoted
-        # ``_updated`` copies only touched rows and returns a fresh Board,
-        # preserving the persistent-value semantics of the board model.
-        return board._updated(changes)
+        # Coordinate/piece invariants have been checked above; skip the
+        # duplicate validation pass while retaining copy-on-write rows.
+        return board._updated_validated(changes)

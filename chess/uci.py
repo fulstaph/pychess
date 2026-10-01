@@ -15,7 +15,7 @@ Handshake sequence after spawning the process:
 Per game: ``ucinewgame`` + ``isready``/``readyok``, then
 ``position startpos moves ...`` (or ``position fen ...``), then
 ``go depth/movetime``; the engine answers with ``info`` lines while
-searching and finally ``bestmove <uci-move>`` (or ``bestmove (none)``
+searching and finally ``bestmove <uci-move>`` (or ``bestmove 0000``
 when there is no legal move).  Shutdown is a ``quit`` command.
 
 Reads are line-buffered because UCI is strictly line-oriented: every
@@ -44,11 +44,16 @@ from collections.abc import Sequence
 from types import TracebackType
 from typing import Self, TextIO
 
-from .engine import choose_move
 from .game import ChessGame
 from .helpers import square_notation
 from .log import get_logger, setup_logging
 from .move import Move
+from .search import (
+    DEFAULT_ENGINE_CONFIG,
+    MAX_SEARCH_DEPTH,
+    EngineConfig,
+    SearchEngine,
+)
 
 logger = get_logger("uci")
 
@@ -284,9 +289,9 @@ class UCIEngine:
         self.send_command(" ".join(cmd_parts))
         lines = self.wait_for("bestmove", timeout=calc_timeout)
         bestmove_line = lines[-1]
-        # "bestmove" is the first token; the move (or "(none)") follows.
+        # "bestmove" is the first token; the move (or a null move) follows.
         tokens = bestmove_line.split()
-        if len(tokens) < 2 or tokens[1] == "(none)":
+        if len(tokens) < 2 or tokens[1] in {"(none)", "0000"}:
             logger.error("Engine reported no legal moves: %s", bestmove_line)
             raise UCIEngineError("No legal moves available")
         return tokens[1]
@@ -343,9 +348,93 @@ class UCIEngine:
         self.close()
 
 
+_MIN_DEPTH = 1
+_MAX_DEPTH = MAX_SEARCH_DEPTH
+
+
+def _clamp_depth(depth: int) -> int:
+    return min(_MAX_DEPTH, max(_MIN_DEPTH, depth))
+
+
+def _token_int(tokens: list[str], key: str) -> int | None:
+    if key not in tokens:
+        return None
+    index = tokens.index(key) + 1
+    if index >= len(tokens):
+        return None
+    try:
+        return int(tokens[index])
+    except ValueError:
+        return None
+
+
+def _go_limits(
+    tokens: list[str], turn: str, default_depth: int
+) -> tuple[int, int | None]:
+    """Return ``(depth ceiling, budget ms)``. None budget is a fixed depth."""
+    explicit = _token_int(tokens, "depth")
+    depth = _clamp_depth(explicit if explicit is not None else default_depth)
+    movetime = _token_int(tokens, "movetime")
+    if movetime is not None:
+        ceiling = depth if explicit is not None else _MAX_DEPTH
+        return ceiling, max(1, movetime)
+    remaining = _token_int(tokens, "wtime" if turn == "w" else "btime")
+    if remaining is None:
+        return depth, None
+    increment = _token_int(tokens, "winc" if turn == "w" else "binc") or 0
+    slices = _token_int(tokens, "movestogo")
+    if slices is None or slices < 1:
+        slices = 30
+    ceiling = depth if explicit is not None else _MAX_DEPTH
+    return ceiling, max(1, remaining // slices + increment)
+
+
+def _search_within(
+    game: ChessGame,
+    depth_limit: int,
+    budget_ms: int | None,
+    quiescence: bool,
+    search_engine: SearchEngine | None = None,
+) -> Move:
+    """Iterative-deepen to ``depth_limit`` and keep the last completed move."""
+    if search_engine is None:
+        search_engine = SearchEngine(
+            EngineConfig(search_depth=depth_limit, quiescence=quiescence)
+        )
+    return search_engine.choose_move(
+        game,
+        depth=depth_limit,
+        quiescence=quiescence,
+        time_limit_ms=budget_ms,
+    )
+
+
+def _position_from_tokens(current: ChessGame, tokens: list[str]) -> ChessGame:
+    """Apply a ``position`` command. A bad FEN raises; a bad move stops replay."""
+    moves_idx = tokens.index("moves") if "moves" in tokens else -1
+    if "startpos" in tokens:
+        game = ChessGame()
+    elif "fen" in tokens:
+        fen_tokens = tokens[2:moves_idx] if moves_idx != -1 else tokens[2:]
+        if not fen_tokens:
+            raise ValueError("missing FEN")
+        game = ChessGame.from_fen(" ".join(fen_tokens))
+    else:
+        game = current
+    if moves_idx != -1:
+        for move_str in tokens[moves_idx + 1 :]:
+            try:
+                game.make_move(move_str)
+            except ValueError:
+                logger.warning("stopped replaying at illegal move %s", move_str)
+                break
+    return game
+
+
 def run_uci_server(
     input_stream: TextIO | None = None,
     output_stream: TextIO | None = None,
+    engine_config: EngineConfig = DEFAULT_ENGINE_CONFIG,
 ) -> None:
     """Run the pychess UCI engine server loop communicating over text streams.
 
@@ -365,8 +454,9 @@ def run_uci_server(
     stdout = output_stream if output_stream is not None else sys.stdout
 
     game = ChessGame()
-    search_depth = 2
-    quiescence_enabled = True
+    search_engine = SearchEngine(engine_config)
+    search_depth = engine_config.search_depth
+    quiescence_enabled = engine_config.quiescence
 
     for raw_line in stdin:
         line = raw_line.strip()
@@ -376,9 +466,14 @@ def run_uci_server(
 
         if line == "uci":
             stdout.write("id name pychess\n")
-            stdout.write("id author pychess developers\n")
-            stdout.write("option name Depth type spin default 2 min 1 max 8\n")
-            stdout.write("option name Quiescence type check default true\n")
+            stdout.write(
+                f"option name Depth type spin default {search_depth} "
+                f"min 1 max {MAX_SEARCH_DEPTH}\n"
+            )
+            stdout.write(
+                f"option name Quiescence type check default "
+                f"{str(quiescence_enabled).lower()}\n"
+            )
             stdout.write("uciok\n")
             stdout.flush()
         elif line == "isready":
@@ -386,6 +481,7 @@ def run_uci_server(
             stdout.flush()
         elif line == "ucinewgame":
             game = ChessGame()
+            search_engine.clear()
         elif line.startswith("setoption"):
             # "setoption name <Name> value <value>" — the option name
             # may contain spaces, so it is reconstructed from the tokens
@@ -400,45 +496,29 @@ def run_uci_server(
                 opt_val = " ".join(parts[val_idx:]) if "value" in parts else ""
                 if opt_name == "depth":
                     with contextlib.suppress(ValueError):
-                        search_depth = max(1, int(opt_val))
+                        search_depth = _clamp_depth(int(opt_val))
                 elif opt_name == "quiescence":
                     quiescence_enabled = opt_val.lower() in ("true", "1", "yes")
         elif line.startswith("position"):
             tokens = line.split()
-            moves_idx = tokens.index("moves") if "moves" in tokens else -1
-            if "startpos" in tokens:
-                game = ChessGame()
-            elif "fen" in tokens:
-                fen_tokens = tokens[2:moves_idx] if moves_idx != -1 else tokens[2:]
-                game = ChessGame.from_fen(" ".join(fen_tokens))
-
-            if moves_idx != -1:
-                for move_str in tokens[moves_idx + 1 :]:
-                    try:
-                        game.make_move(move_str)
-                    except ValueError:
-                        # A bad replay line means the position is
-                        # already diverged; stop replaying rather than
-                        # guessing.
-                        break
+            try:
+                game = _position_from_tokens(game, tokens)
+            except ValueError as exc:
+                logger.warning("rejected position %r: %s", line, exc)
         elif line.startswith("go"):
             tokens = line.split()
-            depth = search_depth
-            if "depth" in tokens:
-                try:
-                    d_idx = tokens.index("depth") + 1
-                    if d_idx < len(tokens):
-                        depth = int(tokens[d_idx])
-                except ValueError, IndexError:
-                    # Malformed "go" line: keep the configured default.
-                    pass
             legal = game.legal_moves()
             if not legal:
-                stdout.write("bestmove (none)\n")
+                stdout.write("bestmove 0000\n")
             else:
+                depth_limit, budget_ms = _go_limits(tokens, game.turn, search_depth)
                 try:
-                    selected = choose_move(
-                        game, depth=depth, quiescence=quiescence_enabled
+                    selected = _search_within(
+                        game,
+                        depth_limit,
+                        budget_ms,
+                        quiescence_enabled,
+                        search_engine,
                     )
                 except ValueError:
                     # Search found nothing usable; any legal move is a

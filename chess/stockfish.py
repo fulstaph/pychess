@@ -49,11 +49,11 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .engine import choose_move
 from .game import ChessGame, GameStatus, print_board
 from .log import get_logger, setup_logging
 from .move import Move
 from .piece import Color
+from .search import DEFAULT_ENGINE_CONFIG, MAX_SEARCH_DEPTH, EngineConfig, SearchEngine
 from .uci import UCIEngine, UCIEngineError, to_uci
 
 logger = get_logger("stockfish")
@@ -157,7 +157,7 @@ class Stockfish(UCIEngine):
         self,
         game: ChessGame,
         moves_history: Sequence[Move | str] | None = None,
-        movetime_ms: int = 100,
+        movetime_ms: int | None = 100,
         depth: int | None = None,
     ) -> Move:
         """Query Stockfish for the best move in the given position.
@@ -272,13 +272,14 @@ def play_match(
     logger.info("Match start: %s vs %s", white_name, black_name)
 
     while True:
-        if game.status == GameStatus.CHECKMATE:
+        if game.is_checkmate():
             winner = game.get_winner()
             termination = "checkmate"
             break
-        if game.status == GameStatus.STALEMATE:
+        reason = game.draw_reason()
+        if reason is not None:
             winner = None
-            termination = "stalemate"
+            termination = reason
             break
         if len(played_moves) >= max_moves * 2:
             winner = None
@@ -345,7 +346,7 @@ def run_series(
     stockfish: Stockfish,
     games: int = 2,
     movetime_ms: int = 100,
-    depth: int = 2,
+    depth: int = DEFAULT_ENGINE_CONFIG.search_depth,
     max_moves: int = 150,
     engine_name: str = "pychess",
     stockfish_name: str = "Stockfish",
@@ -364,6 +365,7 @@ def run_series(
         raise ValueError("Number of games must be at least 1")
 
     match_results: list[MatchResult] = []
+    search_engine = SearchEngine(EngineConfig(search_depth=depth))
     logger.info(
         "Series start: %d game(s), pychess depth=%d, stockfish movetime=%dms",
         games,
@@ -372,13 +374,14 @@ def run_series(
     )
 
     def pychess_player(g: ChessGame, _history: Sequence[Move]) -> Move:
-        return choose_move(g, depth=depth)
+        return search_engine.choose_move(g, depth=depth)
 
     def stockfish_player(g: ChessGame, history: Sequence[Move]) -> Move:
         return stockfish.get_move(g, moves_history=history, movetime_ms=movetime_ms)
 
     for i in range(1, games + 1):
         stockfish.new_game()
+        search_engine.clear()
         w_player: PlayerCallable
         b_player: PlayerCallable
         if i % 2 == 1:
@@ -482,7 +485,7 @@ def play_human_vs_stockfish(
     while True:
         print_board(game.board)
         print(f"Status: {game.status.value}")
-        if game.status == GameStatus.CHECKMATE:
+        if game.is_checkmate():
             winner_side = game.get_winner()
             winner_str = "White" if winner_side == "w" else "Black"
             print(f"Checkmate! {winner_str} wins.")
@@ -496,19 +499,21 @@ def play_human_vs_stockfish(
                 moves=tuple(played_moves),
                 halfmove_count=len(played_moves),
             )
-        if game.status == GameStatus.STALEMATE:
-            print("Stalemate! Draw.")
-            logger.info("Game ended: stalemate")
+        announcement = game.draw_announcement()
+        if announcement is not None:
+            print(announcement)
+            reason = game.draw_reason() or "draw"
+            logger.info("Game ended: %s", reason)
             return MatchResult(
                 white_name=white_name,
                 black_name=black_name,
                 winner=None,
                 status=game.status,
-                termination="stalemate",
+                termination=reason,
                 moves=tuple(played_moves),
                 halfmove_count=len(played_moves),
             )
-        if game.status == GameStatus.CHECK:
+        if game.is_check():
             print("Check!")
 
         if game.turn == human_color:
@@ -579,8 +584,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--depth",
         "-d",
         type=int,
-        default=2,
-        help="Pychess minimax depth (default: 2)",
+        choices=range(1, MAX_SEARCH_DEPTH + 1),
+        default=DEFAULT_ENGINE_CONFIG.search_depth,
+        help=f"Pychess search depth (1-{MAX_SEARCH_DEPTH})",
     )
     parser.add_argument(
         "--stockfish-path",

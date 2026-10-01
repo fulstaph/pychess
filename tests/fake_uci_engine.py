@@ -89,7 +89,7 @@ def main() -> None:
         elif line.startswith("go"):
             legal = game.legal_moves()
             if not legal:
-                sys.stdout.write("bestmove (none)\n")
+                sys.stdout.write("bestmove 0000\n")
             else:
                 try:
                     selected = choose_move(game, depth=1)

@@ -21,7 +21,12 @@ Install Python 3.14 or newer and run the lessons from the repository root:
 uv run --locked --extra notebooks jupyter lab notebooks
 ```
 
-the notebooks are ordered: [01 — board and coordinates](notebooks/01_board_and_coordinates.ipynb), [02 — moves and rules](notebooks/02_moves_and_rules.ipynb), then [03 — engine decisions](notebooks/03_engine_decisions.ipynb). run each notebook's cells top-to-bottom in a separate kernel.
+The curriculum contains 20 notebooks in order. Run each notebook's cells top-to-bottom in a separate kernel. Percent-format `.py` files accompany the notebooks as editable sources.
+
+- **Core:** [01 — board and coordinates](notebooks/01_board_and_coordinates.ipynb), [02 — moves and rules](notebooks/02_moves_and_rules.ipynb), [03 — engine decisions](notebooks/03_engine_decisions.ipynb), [04 — Zobrist hashing](notebooks/04_zobrist_hashing.ipynb), [05 — evaluation deep dive](notebooks/05_evaluation_deep_dive.ipynb).
+- **Representation and search:** [06 — board representations](notebooks/06_board_representations.ipynb), [07 — minimax, negamax, and alpha-beta](notebooks/07_search_algorithms.ipynb), [08 — search heuristics](notebooks/08_search_heuristics.ipynb), [09 — transposition tables](notebooks/09_transposition_tables.ipynb), [10 — draw state and repetition](notebooks/10_draw_state_and_repetition.ipynb), [11 — advanced evaluation](notebooks/11_advanced_evaluation.ipynb).
+- **Validation and engine systems:** [12 — testing and benchmarking](notebooks/12_engine_testing_and_benchmarking.ipynb), [13 — evaluation tuning](notebooks/13_evaluation_tuning.ipynb), [14 — chess formats](notebooks/14_chess_formats.ipynb), [15 — UCI protocol](notebooks/15_uci_protocol.ipynb), [16 — endgame programming](notebooks/16_endgame_programming.ipynb), [17 — NNUE foundations](notebooks/17_nnue_foundations.ipynb), [18 — opening books](notebooks/18_opening_books.ipynb), [19 — parallel search](notebooks/19_parallel_search.ipynb).
+- **Performance:** [20 — move-generation performance](notebooks/20_move_generation_performance.ipynb).
 
 If [go-task](https://taskfile.dev/) is installed, run `task` to list available tasks:
 
@@ -31,6 +36,9 @@ If [go-task](https://taskfile.dev/) is installed, run `task` to list available t
 * `task play:stockfish`: Play interactively against Stockfish in the terminal.
 * `task uci`: Run pychess as a standard Universal Chess Interface (UCI) engine server.
 * `task bench`: Run canonical perft move-generation benchmarks.
+* `task bench:search -- --depth 3 --repeats 3`: Benchmark cold search across fixed start, tactical, middlegame, and endgame positions.
+* `task bench:matches -- --output /tmp/matches.json`: Run seeded, paired
+  evaluator matches against Stockfish and save move-level JSON records.
 * `task test` / `task test:unit` / `task test:cov`: Run test suite with 80% coverage check, fast unit mode, or detailed coverage report.
 * `task check`: Run complete verification gate (lint, format-check, strict typecheck, tests).
 * `task clean`: Remove build artifacts and caches.
@@ -60,9 +68,52 @@ print_board(game.get_board())
 
 `legal_moves()` returns a tuple of legal `Move` values for the side to move. `make_move()` takes a notation string or a generated legal `Move`; an illegal move raises `ValueError` without changing the game. `board`, `turn`, `status`, and `move_num` expose the current position, player (`"w"` or `"b"`), state, and full-move number (starting at 1; incremented after Black). `get_board()` and `get_turn()` return the same board and turn. `castles(player, side)` reports castling rights for `"w"`/`"b"` and `"kingside"`/`"queenside"`.
 
-The four states are `GameStatus.ACTIVE`, `CHECK`, `CHECKMATE`, and `STALEMATE`. `is_check()`, `is_checkmate()`, and `is_stalemate()` inspect the current position; `get_winner()` returns the winning color after checkmate and `None` otherwise. `is_draw()` evaluates stalemate, the 50-move rule (`is_fifty_moves()`), threefold repetition (`is_threefold_repetition()`), and insufficient material (`is_insufficient_material()`). Positions can be serialized and loaded via `to_fen()` and `from_fen()`. Checkmate and stalemate end the game; further moves are rejected.
+The four states are `GameStatus.ACTIVE`, `CHECK`, `CHECKMATE`, and `STALEMATE`. `is_check()`, `is_checkmate()`, and `is_stalemate()` inspect the current position; `get_winner()` returns the winning color after checkmate and `None` otherwise. `is_draw()` evaluates stalemate, the 50-move rule (`is_fifty_moves()`), threefold repetition (`is_threefold_repetition()`), and insufficient material (`is_insufficient_material()`). Those rule draws do not change `status` and do not make `is_stalemate()` true; `legal_moves()` still lists any escapes. Positions can be serialized and loaded via `to_fen()` and `from_fen()`. Checkmate, stalemate, and `is_draw()` end a played game; the library rejects further moves only for checkmate and stalemate.
 
 A `Move` records `piece`, `from_square`, `to_square`, `captured_piece`, `special`, and `promotion_to`. Its `special` value is one of `"none"`, `"castle_k"`, `"castle_q"`, `"en_passant"`, or `"promotion"`. For a move generated from the current position, `move.execute(board)` returns a new board; use `game.make_move(move)` to update the game, including turn, rights, en-passant target, and status.
+
+## Search and engine configuration
+
+The built-in engine defaults to depth 3, quiescence search, a bounded
+transposition table, and the `basic` evaluator. The `positional` evaluator is
+available as an opt-in profile; current paired matches do not establish a
+strength improvement. Depth accepts integers from 1 through 8. Configure a
+reusable searcher directly:
+
+```python
+from chess import ChessGame
+from chess.engine import EngineConfig, SearchEngine
+
+engine = SearchEngine(EngineConfig(search_depth=4))
+game = ChessGame()
+move = engine.choose_move(game)
+print(move)
+```
+
+`EngineConfig` also accepts `quiescence`, `quiescence_depth`,
+`transposition_table_size`, and `evaluation_profile` (`"basic"` or
+`"positional"`). `SearchEngine` retains bounded transpositions and move-ordering
+history between searches; call `clear()` at match boundaries. It is not
+thread-safe; use one `SearchEngine` per concurrent worker. Per-search `depth`
+and `quiescence` arguments override the configured defaults.
+
+Set the same default depth at application entry points with
+`python -m chess.engine --depth 4`, `python -m chess.web --depth 4`, or
+`python -m chess.stockfish --depth 4`. The UCI server advertises a `Depth`
+option; web AI requests may supply an optional `depth` to override the app's
+configured value.
+
+Search uses iterative deepening, alpha-beta bounds, hash, capture/promotion,
+killer, and history ordering, mate-distance scores, and capture quiescence.
+The `positional` evaluator tapers king activity by game phase and scores bishop
+pairs plus isolated, doubled, and passed pawns.
+Run `uv run --locked python -m chess.bench --depth 3 --repeats 3` to benchmark
+fixed positions; timings are observations, not test assertions.
+Run `python -m chess.match_bench --output /tmp/matches.json` for seeded,
+color-balanced `basic`/`positional` matches against Stockfish with a shared
+requested 100 ms per-move budget across skill levels 0 and 5. The JSON stores
+schedule seed, complete UCI histories, per-ply elapsed time, and pychess search
+stats. Use `--mode depth --depth 3` for fixed-depth comparisons.
 
 ## Boards and squares
 

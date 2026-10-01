@@ -86,7 +86,7 @@ class Piece:
 class Board:
     """Persistent board; every move or fixture update creates a new value."""
 
-    __slots__ = ("_squares",)
+    __slots__ = ("_bk", "_squares", "_wk")
     BOARD_SIZE = 8
 
     def __init__(
@@ -99,15 +99,28 @@ class Board:
             squares = tuple((None,) * 8 for _ in range(8))
         if len(squares) != 8 or any(len(row) != 8 for row in squares):
             raise ValueError("Board must be eight by eight")
-        if any(
-            piece is not None and not isinstance(piece, Piece)
-            for row in squares
-            for piece in row
-        ):
-            raise ValueError("Board squares must contain pieces or None")
+        # Single scan: validate types and cache king positions.
+        wk: Square | None = None
+        bk: Square | None = None
+        for r, row in enumerate(squares):
+            for c, piece in enumerate(row):
+                if piece is not None:
+                    if not isinstance(piece, Piece):
+                        raise ValueError("Board squares must contain pieces or None")
+                    if piece.type == PieceType.KING:
+                        if piece.color == "w":
+                            wk = (r, c)
+                        else:
+                            bk = (r, c)
         # Normalize to immutable nested tuples so later copies never see a
         # caller-mutable list alias.
         self._squares = tuple(tuple(row) for row in squares)
+        self._wk = wk
+        self._bk = bk
+
+    def king_square(self, color: Color) -> Square | None:
+        """Cached king position; ``None`` if the color has no king."""
+        return self._wk if color == "w" else self._bk
 
     @property
     def squares(self) -> tuple[tuple[Piece | None, ...], ...]:
@@ -137,6 +150,10 @@ class Board:
         self._validate_square(square)
         return self._squares[square[0]][square[1]]
 
+    def _get_fast(self, square: Square) -> Piece | None:
+        """Direct grid lookup; caller guarantees valid coordinates."""
+        return self._squares[square[0]][square[1]]
+
     def is_empty(self, square: Square) -> bool:
         return self.get(square) is None
 
@@ -150,18 +167,78 @@ class Board:
             self._validate_square(square)
             if piece is not None and not isinstance(piece, Piece):
                 raise ValueError("Board squares must contain pieces or None")
-        # Copy-on-write: only rows touched by `changes` are copied; the
-        # other rows are shared with the previous board version for free.
+        return self._updated_validated(changes)
+
+    def _updated_validated(self, changes: Mapping[Square, Piece | None]) -> Board:
+        """Apply changes whose coordinates and pieces were already validated."""
         rows = list(self._squares)
-        for row in {square[0] for square in changes}:
-            updated_row = list(rows[row])
-            for (changed_row, col), piece in changes.items():
-                if changed_row == row:
+        for changed_row in {square[0] for square in changes}:
+            updated_row = list(rows[changed_row])
+            for (row_index, col), piece in changes.items():
+                if row_index == changed_row:
                     updated_row[col] = piece
-            rows[row] = tuple(updated_row)
-        # Rebuilding through __init__ re-validates; with the checks above
-        # this is a no-cost guarantee, not a second defense layer.
-        return Board(tuple(rows))
+            rows[changed_row] = tuple(updated_row)
+
+        king_changed = any(
+            (
+                (existing := self._squares[square[0]][square[1]]) is not None
+                and existing.type == PieceType.KING
+            )
+            or (piece is not None and piece.type == PieceType.KING)
+            for square, piece in changes.items()
+        )
+        if king_changed:
+            wk: Square | None = None
+            bk: Square | None = None
+            for row_index, board_row in enumerate(rows):
+                for col, piece in enumerate(board_row):
+                    if piece is not None and piece.type == PieceType.KING:
+                        if piece.color == "w":
+                            wk = (row_index, col)
+                        else:
+                            bk = (row_index, col)
+        else:
+            wk, bk = self._wk, self._bk
+
+        # This path only consumes validated changes applied to an existing
+        # board, so rebuilding the 64-square validation scan is redundant.
+        updated = object.__new__(Board)
+        updated._squares = tuple(rows)
+        updated._wk = wk
+        updated._bk = bk
+        return updated
+
+    def _moved(self, source: Square, target: Square, placed: Piece) -> Board:
+        """Clear ``source`` and put ``placed`` on ``target`` (distinct, validated).
+
+        Covers every move that touches exactly two squares. A moving king's
+        cache entry is set directly to ``target`` instead of rescanning the
+        board; the caller guarantees the overwritten target is not a king.
+        """
+        source_row, source_col = source
+        target_row, target_col = target
+        rows = list(self._squares)
+        row = list(rows[source_row])
+        row[source_col] = None
+        if source_row == target_row:
+            row[target_col] = placed
+            rows[source_row] = tuple(row)
+        else:
+            rows[source_row] = tuple(row)
+            row = list(rows[target_row])
+            row[target_col] = placed
+            rows[target_row] = tuple(row)
+        wk, bk = self._wk, self._bk
+        if placed.type == PieceType.KING:
+            if placed.color == "w":
+                wk = target
+            else:
+                bk = target
+        updated = object.__new__(Board)
+        updated._squares = tuple(rows)
+        updated._wk = wk
+        updated._bk = bk
+        return updated
 
     @classmethod
     def from_notation(cls) -> Board:

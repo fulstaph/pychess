@@ -207,6 +207,10 @@ input[type="text"] {
   font-size: 0.85rem;
 }
 
+#games-select {
+  margin-bottom: 8px;
+}
+
 #eval-bar {
   height: 8px;
   background: #333;
