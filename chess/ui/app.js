@@ -53,7 +53,7 @@ function loadStoredSessionId() {
 export async function fetchState() {
   if (currentSessionId === null) return;
   try {
-    const res = await fetch(`/api/sessions/${currentSessionId}`);
+    const res = await fetch(`/api/v1/sessions/${currentSessionId}`);
     if (!res.ok) return;
     updateUI(await res.json());
   } catch {
@@ -61,14 +61,15 @@ export async function fetchState() {
   }
 }
 
-// Send JSON and return the parsed body; throws Error(server detail) on !ok.
+// Send JSON and return the parsed body (null for 204); throws Error(server
+// detail) on !ok.
 export async function sendJSON(path, body, method = 'POST') {
   const res = await fetch(path, {
     method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
+    body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
   });
-  const data = await res.json();
+  const data = res.status === 204 ? null : await res.json();
   if (!res.ok) {
     const detail = typeof data.detail === 'string' ? data.detail : res.statusText;
     throw new Error(detail);
@@ -174,15 +175,15 @@ export function updateUI(data) {
   document.getElementById('fen-input').value = data.fen;
 }
 
-// Refresh the Sessions dropdown from GET /api/sessions; preserves the
+// Refresh the Sessions dropdown from GET /api/v1/sessions; preserves the
 // current selection when its id is still present.
 export async function refreshSessions() {
   const select = document.getElementById('sessions-select');
   if (!select) return;
   let sessions = [];
   try {
-    const res = await fetch('/api/sessions');
-    if (res.ok) sessions = await res.json();
+    const res = await fetch('/api/v1/sessions?page_size=100');
+    if (res.ok) sessions = (await res.json()).items;
   } catch {
     return;
   }
@@ -204,7 +205,7 @@ document.getElementById('sessions-select').onchange = async (e) => {
   currentSessionId = Number(id);
   saveSessionId();
   try {
-    const data = await sendJSON(`/api/sessions/${currentSessionId}`, {}, 'GET');
+    const data = await sendJSON(`/api/v1/sessions/${currentSessionId}`, {}, 'GET');
     updateUI(data);
   } catch (err) {
     alert(err.message);
@@ -212,10 +213,10 @@ document.getElementById('sessions-select').onchange = async (e) => {
   }
 };
 
-// New session: POST /api/sessions (standard start), then switch to it.
+// New session: POST /api/v1/sessions (standard start), then switch to it.
 document.getElementById('btn-new').onclick = async () => {
   try {
-    const data = await sendJSON('/api/sessions', {});
+    const data = await sendJSON('/api/v1/sessions', {});
     currentSessionId = data.id;
     saveSessionId();
     updateUI(data);
@@ -232,7 +233,7 @@ document.getElementById('btn-session-delete').onclick = async () => {
   if (currentSessionId === null) return;
   if (!confirm(`Delete session #${currentSessionId}?`)) return;
   try {
-    await sendJSON(`/api/sessions/${currentSessionId}`, {}, 'DELETE');
+    await sendJSON(`/api/v1/sessions/${currentSessionId}`, {}, 'DELETE');
   } catch (err) {
     alert(err.message);
     refreshSessions();
@@ -288,7 +289,7 @@ export async function submitMove(moveStr) {
   const mode = document.getElementById('ai-mode').value;
   playBeep(220, 'triangle', 0.05);
   try {
-    const data = await sendJSON(`/api/sessions/${currentSessionId}/move`, {
+    const data = await sendJSON(`/api/v1/sessions/${currentSessionId}/move`, {
       move: moveStr,
       ai_reply: mode !== 'human',
       depth: mode === 'minimax-1' ? 1 : 2,
@@ -327,7 +328,7 @@ document.getElementById('promo-modal').addEventListener('click', (e) => {
 document.getElementById('btn-undo').onclick = async () => {
   const mode = document.getElementById('ai-mode').value;
   try {
-    const data = await sendJSON(`/api/sessions/${currentSessionId}/undo`, {
+    const data = await sendJSON(`/api/v1/sessions/${currentSessionId}/undo`, {
       steps: mode === 'human' ? 1 : 2,
     });
     updateUI(data);
@@ -347,7 +348,7 @@ document.getElementById('btn-ai').onclick = async () => {
   const depth = mode === 'minimax-1' ? 1 : 2;
   const useSf = mode === 'stockfish';
   try {
-    const data = await sendJSON(`/api/sessions/${currentSessionId}/ai_move`, {
+    const data = await sendJSON(`/api/v1/sessions/${currentSessionId}/ai-move`, {
       depth,
       stockfish: useSf,
     });
@@ -362,7 +363,7 @@ document.getElementById('fen-input').onchange = async (e) => {
   const fen = e.target.value.trim();
   if (!fen) return;
   try {
-    const data = await sendJSON(`/api/sessions/${currentSessionId}/reset`, { fen });
+    const data = await sendJSON(`/api/v1/sessions/${currentSessionId}/reset`, { fen });
     updateUI(data);
   } catch (err) {
     alert(err.message);
@@ -382,7 +383,7 @@ document.getElementById('fen-input').onchange = async (e) => {
     currentSessionId = Number(select.value);
   } else {
     try {
-      const data = await sendJSON('/api/sessions', {});
+      const data = await sendJSON('/api/v1/sessions', {});
       currentSessionId = data.id;
       await refreshSessions();
     } catch (err) {
@@ -396,7 +397,7 @@ document.getElementById('fen-input').onchange = async (e) => {
 
   async function sessionsHaveId(id) {
     try {
-      const res = await fetch(`/api/sessions/${id}`);
+      const res = await fetch(`/api/v1/sessions/${id}`);
       return res.ok;
     } catch {
       return false;

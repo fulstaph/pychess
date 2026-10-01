@@ -25,7 +25,8 @@ parse — and the fullmove number is the only move counter persisted.
 Public surface: ``ChessGame`` (state accessors, ``legal_moves``,
 ``make_move``, ``after``, ``castles``, status predicates, ``from_fen``,
 ``to_fen``) plus module-level ``to_fen`` / ``from_fen`` / ``print_board``
-helpers. ``make_move`` and ``after`` accept ``str | Move``: strings are
+helpers. ``select_move`` resolves a ``str | Move`` to one legal candidate
+without applying it; ``make_move`` and ``after`` accept ``str | Move``: strings are
 matched against the current legal candidates as coordinate or SAN
 notation; a ``ValueError`` is raised, state left untouched, when the
 input matches no legal move.
@@ -646,7 +647,7 @@ class ChessGame:
             self._state, in_check=self.is_check(), pinned=self._pinned()
         )
 
-    def _select_move(self, move: str | Move) -> Move:
+    def select_move(self, move: str | Move) -> Move:
         """Resolve a ``str | Move`` request to exactly one legal candidate.
 
         Strings go through the SAN/coordinate parser; ``Move`` objects
@@ -675,7 +676,7 @@ class ChessGame:
         as it was — the fail-fast contract callers rely on.
         """
         try:
-            selected = self._select_move(move)
+            selected = self.select_move(move)
         except ValueError as exc:
             logger.warning("rejected move %r: %s", move, exc)
             raise
@@ -706,7 +707,7 @@ class ChessGame:
         position history plus its own new position key, which is what
         lets threefold-repetition detection span sibling branches.
         """
-        selected = self._select_move(move)
+        selected = self.select_move(move)
         return self._after_selected(selected, recompute_status=True)
 
     def _after_generated(self, move: Move) -> ChessGame:

@@ -282,7 +282,7 @@ def main(
                 print("Move undone.")
                 continue
             try:
-                selected = game._select_move(text)
+                selected = game.select_move(text)
             except ValueError as error:
                 print(f"Invalid move: {error}")
                 continue

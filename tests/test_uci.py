@@ -31,11 +31,11 @@ def test_to_uci_formats():
     game = ChessGame()
 
     # Normal pawn push
-    move_e4 = game._select_move("e4")
+    move_e4 = game.select_move("e4")
     assert to_uci(move_e4) == "e2e4"
 
     # Knight move
-    move_nf3 = game._select_move("Nf3")
+    move_nf3 = game.select_move("Nf3")
     assert to_uci(move_nf3) == "g1f3"
 
     # Castling kingside (White)
@@ -46,7 +46,7 @@ def test_to_uci_formats():
         .with_piece(sq("e8"), Piece(PieceType.KING, "b"))
     )
     game_k = ChessGame(board_k, castling_rights=frozenset("K"))
-    move_castle_k = game_k._select_move("O-O")
+    move_castle_k = game_k.select_move("O-O")
     assert to_uci(move_castle_k) == "e1g1"
 
     # Castling queenside (White)
@@ -57,7 +57,7 @@ def test_to_uci_formats():
         .with_piece(sq("e8"), Piece(PieceType.KING, "b"))
     )
     game_q = ChessGame(board_q, castling_rights=frozenset("Q"))
-    move_castle_q = game_q._select_move("O-O-O")
+    move_castle_q = game_q.select_move("O-O-O")
     assert to_uci(move_castle_q) == "e1c1"
 
     # Castling kingside and queenside (Black)
@@ -69,10 +69,10 @@ def test_to_uci_formats():
         .with_piece(sq("e1"), Piece(PieceType.KING, "w"))
     )
     game_bk = ChessGame(board_b, turn="b", castling_rights=frozenset("k"))
-    assert to_uci(game_bk._select_move("o-o")) == "e8g8"
+    assert to_uci(game_bk.select_move("o-o")) == "e8g8"
 
     game_bq = ChessGame(board_b, turn="b", castling_rights=frozenset("q"))
-    assert to_uci(game_bq._select_move("o-o-o")) == "e8c8"
+    assert to_uci(game_bq.select_move("o-o-o")) == "e8c8"
 
     # Promotion
     board_promo = (
@@ -82,10 +82,10 @@ def test_to_uci_formats():
         .with_piece(sq("h8"), Piece(PieceType.KING, "b"))
     )
     game_promo = ChessGame(board_promo)
-    assert to_uci(game_promo._select_move("a8=Q")) == "a7a8q"
-    assert to_uci(game_promo._select_move("a8=R")) == "a7a8r"
-    assert to_uci(game_promo._select_move("a8=B")) == "a7a8b"
-    assert to_uci(game_promo._select_move("a8=N")) == "a7a8n"
+    assert to_uci(game_promo.select_move("a8=Q")) == "a7a8q"
+    assert to_uci(game_promo.select_move("a8=R")) == "a7a8r"
+    assert to_uci(game_promo.select_move("a8=B")) == "a7a8b"
+    assert to_uci(game_promo.select_move("a8=N")) == "a7a8n"
 
     # En passant
     game_ep = ChessGame()
@@ -93,7 +93,7 @@ def test_to_uci_formats():
     game_ep.make_move("a6")
     game_ep.make_move("e5")
     game_ep.make_move("d5")
-    move_ep = game_ep._select_move("exd6")
+    move_ep = game_ep.select_move("exd6")
     assert to_uci(move_ep) == "e5d6"
 
 

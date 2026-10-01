@@ -165,7 +165,7 @@ class Stockfish(UCIEngine):
         Positions are communicated by replaying the move history (the
         cheap, allocation-free path for live games) or by FEN when the
         caller has no history.  The answer is validated through
-        ``game._select_move`` so an engine hallucination surfaces as a
+        ``game.select_move`` so an engine hallucination surfaces as a
         ``ValueError`` instead of corrupting the game state.
         """
         if moves_history is not None:
@@ -178,7 +178,7 @@ class Stockfish(UCIEngine):
 
         uci_str = self.go(movetime_ms=movetime_ms, depth=depth)
         logger.debug("Stockfish -> %s", uci_str)
-        return game._select_move(uci_str)
+        return game.select_move(uci_str)
 
 
 @dataclass(frozen=True, slots=True)

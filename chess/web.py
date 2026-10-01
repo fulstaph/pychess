@@ -28,29 +28,37 @@ store write happens inside that lock, so a session's rows are never
 mutated by two threads at once.  Different sessions hold different locks
 and proceed in parallel.
 
-Endpoints (all JSON unless noted):
+Endpoints (all JSON unless noted; every API route lives under ``/api/v1``):
 
     GET  /                      -> the self-contained Chessground HTML page
-    GET  /api/sessions          -> all sessions (newest first) with live state
-    POST /api/sessions          -> {"fen": "..."} or {}; create a session
-    GET  /api/sessions/{id}     -> full serialized position of one session
-    POST /api/sessions/{id}/move     -> {"move": "e2e4", "ai_reply": bool,
+    GET  /api/v1/sessions?page=&page_size=
+                                -> {"items": [summary], "total", "page",
+                          "page_size", "pages"}; summaries are newest first
+                          and share one shape (id, name, created_at,
+                          move_count, fen, turn, status)
+    POST /api/v1/sessions       -> {"fen": "..."} or {}; 201 + Location,
+                          body = position plus the new ``id``
+    GET  /api/v1/sessions/{id}  -> full serialized position of one session
+    POST /api/v1/sessions/{id}/move     -> {"move": "e2e4", "ai_reply": bool,
                           "depth": int?, "stockfish": bool}; optional depth
                           overrides the app's configured search depth
-    POST /api/sessions/{id}/ai_move  -> {"depth": int?, "stockfish": bool};
+    POST /api/v1/sessions/{id}/ai-move  -> {"depth": int?, "stockfish": bool};
                           optional depth overrides the app default
-    POST /api/sessions/{id}/undo     -> {"steps": int}; rolls the session
-                          back ``steps`` half-moves (the UI sends 2 in AI
-                          mode so the human regains the move)
-    POST /api/sessions/{id}/reset    -> {"fen": "..."} or {}; loads a FEN
+    POST /api/v1/sessions/{id}/undo     -> {"steps": int >= 1}; rolls the
+                          session back ``steps`` half-moves, clamped to the
+                          game length (the UI sends 2 in AI mode so the
+                          human regains the move)
+    POST /api/v1/sessions/{id}/reset    -> {"fen": "..."} or {}; loads a FEN
                           position or the standard start and clears history
-    DELETE /api/sessions/{id}   -> remove a session and its moves
+    DELETE /api/v1/sessions/{id} -> 204; removes a session and its moves
 
-Error contract: invalid moves / FENs / bodies return HTTP 400 with
-``{"detail": "..."}``; the session is left untouched (fail fast, no partial
-state).  Unknown session ids return 404.  Engine failure (no Stockfish
-binary, malformed UCI reply) degrades to the built-in minimax instead of
-failing the request.
+Error contract: every error body is ``{"detail": "<string>"}``.  Malformed
+bodies, invalid moves and invalid FENs return 400; the session is left
+untouched (fail fast, no partial state).  Unknown (or non-integer) session
+ids return 404.  Moving or asking the engine to move in a finished game
+returns 409; ``ai-move`` returns 503 when the engine yields no move.  Engine
+failure (no Stockfish binary, malformed UCI reply) degrades to the built-in
+minimax instead of failing the request.
 """
 
 import argparse
@@ -61,12 +69,13 @@ import webbrowser
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field, StringConstraints
 
 from .engine import choose_move, evaluate
 from .game import ChessGame, from_fen
@@ -79,6 +88,9 @@ from .store import GameStore
 from .tui import get_captured_pieces
 from .uci import to_uci
 from .ui import get_html
+
+API_PREFIX = "/api/v1"
+MAX_PAGE_SIZE = 100
 
 logger = get_logger("web")
 
@@ -221,7 +233,7 @@ class SessionRegistry:
         history: list[Move] = []
         states: list[ChessGame] = [game]
         for uci in ucis:
-            move = game._select_move(uci)
+            move = game.select_move(uci)
             game = game.after(move)
             history.append(move)
             states.append(game)
@@ -274,31 +286,86 @@ def serialize_game_state(
 
 
 class MoveRequest(BaseModel):
-    """Body for POST /api/sessions/{id}/move."""
+    """Body for POST /api/v1/sessions/{id}/move."""
 
-    move: str = ""
+    move: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     ai_reply: bool = False
     depth: int | None = Field(default=None, ge=1, le=MAX_SEARCH_DEPTH)
     stockfish: bool = False
 
 
 class UndoRequest(BaseModel):
-    """Body for POST /api/sessions/{id}/undo."""
+    """Body for POST /api/v1/sessions/{id}/undo."""
 
-    steps: int = 1
+    steps: int = Field(default=1, ge=1)
 
 
-class ResetRequest(BaseModel):
-    """Body for POST /api/sessions/{id}/reset and POST /api/sessions."""
+class FenRequest(BaseModel):
+    """Body for POST /api/v1/sessions/{id}/reset and POST /api/v1/sessions."""
 
-    fen: str = ""
+    fen: str | None = None
 
 
 class AIMoveRequest(BaseModel):
-    """Body for POST /api/sessions/{id}/ai_move."""
+    """Body for POST /api/v1/sessions/{id}/ai-move."""
 
     depth: int | None = Field(default=None, ge=1, le=MAX_SEARCH_DEPTH)
     stockfish: bool = False
+
+
+class GameStateModel(BaseModel):
+    """Response schema mirroring ``serialize_game_state``."""
+
+    fen: str
+    turn: Literal["w", "b"]
+    status: str
+    is_check: bool
+    is_checkmate: bool
+    is_stalemate: bool
+    is_draw: bool
+    winner: Literal["w", "b"] | None
+    move_num: int
+    halfmove_clock: int
+    dests: dict[str, list[str]]
+    legal_moves: list[str]
+    captured_w: list[str]
+    captured_b: list[str]
+    material_diff: int
+    eval: int
+    history: list[str]
+
+
+class SessionState(GameStateModel):
+    """Position plus the id of the session that was just created."""
+
+    id: int
+
+
+class SessionSummary(BaseModel):
+    """One row of the session listing; the shape is the same for every session.
+
+    ``fen``/``turn``/``status`` are ``None`` once a game exceeds
+    ``_MAX_LIST_REPLAY`` plies; ``name``/``created_at`` are ``None`` for
+    in-memory sessions.
+    """
+
+    id: int
+    name: str | None
+    created_at: str | None
+    move_count: int
+    fen: str | None
+    turn: Literal["w", "b"] | None
+    status: str | None
+
+
+class SessionPage(BaseModel):
+    """Paginated ``GET /sessions`` response."""
+
+    items: list[SessionSummary]
+    total: int
+    page: int
+    page_size: int
+    pages: int
 
 
 def _engine_move(
@@ -339,6 +406,17 @@ def _engine_move(
     )
 
 
+def _commit(
+    store: GameStore | None, session: WebSession, move: Move, next_game: ChessGame
+) -> None:
+    """Record ``move`` (already validated) and make ``next_game`` current."""
+    session.game = next_game
+    session.history.append(move)
+    session.history_states.append(next_game)
+    if store is not None:
+        store.append_move(session.game_id, to_uci(move))
+
+
 def create_app(
     stockfish_path: str | None = None,
     db_path: str | None = None,
@@ -376,57 +454,93 @@ def create_app(
         """Serve the self-contained frontend (CSS/JS inlined by ``chess.ui``)."""
         return get_html()
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        """Fold pydantic/path validation failures into the ``{"detail": str}`` contract.
+
+        A path id that is not an integer can never name a session, so it is a
+        404 like any other unknown id; every other failure is a 400.
+        """
+        errors = exc.errors()
+        if any(err["loc"][:1] == ("path",) for err in errors):
+            return JSONResponse({"detail": "Session not found"}, status_code=404)
+        detail = "; ".join(
+            ".".join(str(part) for part in err["loc"][1:]) + f": {err['msg']}"
+            if len(err["loc"]) > 1
+            else str(err["msg"])
+            for err in errors
+        )
+        return JSONResponse({"detail": f"Invalid request: {detail}"}, status_code=400)
+
+    api = APIRouter(prefix=API_PREFIX)
+
     # ------------------------------------------------------------------
     # session management
     # ------------------------------------------------------------------
 
-    @app.get("/api/sessions")
-    def list_sessions() -> list[dict[str, Any]]:
-        """All sessions, newest first, with their live state."""
+    @api.get("/sessions", response_model=SessionPage)
+    def list_sessions(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=MAX_PAGE_SIZE),
+    ) -> dict[str, Any]:
+        """One page of session summaries, newest first.
+
+        Only the requested page is touched, so a cold database never replays
+        sessions the caller did not ask for.  Full positions come from
+        ``GET /sessions/{id}``.
+        """
         registry: SessionRegistry = app.state.registry
         store: GameStore = app.state.store
+        ids = registry.list_ids()
+        total = len(ids)
+        start = (page - 1) * page_size
         rows = {g.id: g for g in store.list_games()} if store is not None else {}
-        out: list[dict[str, Any]] = []
-        for game_id in registry.list_ids():
+        items: list[dict[str, Any]] = []
+        for game_id in ids[start : start + page_size]:
             session = registry.get(game_id)
             if session is None:
                 continue
             with session.lock:
                 registry.resync(session)
                 move_count = len(session.history)
-                entry: dict[str, Any] = {"id": game_id, "move_count": move_count}
                 row = rows.get(game_id)
-                if row is not None:
-                    entry["name"] = row.name
-                    entry["created_at"] = row.created_at
-                if move_count > _MAX_LIST_REPLAY:
-                    entry["fen"] = None
-                else:
-                    entry["state"] = serialize_game_state(session.game, session.history)
-                out.append(entry)
-        return out
+                replayed = move_count <= _MAX_LIST_REPLAY
+                items.append(
+                    {
+                        "id": game_id,
+                        "name": row.name if row is not None else None,
+                        "created_at": row.created_at if row is not None else None,
+                        "move_count": move_count,
+                        "fen": session.game.to_fen() if replayed else None,
+                        "turn": session.game.turn if replayed else None,
+                        "status": session.game.status.value if replayed else None,
+                    }
+                )
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size,
+        }
 
-    @app.post("/api/sessions")
-    def create_session(body: ResetRequest) -> dict[str, Any]:
+    @api.post("/sessions", status_code=201, response_model=SessionState)
+    def create_session(body: FenRequest, response: Response) -> dict[str, Any]:
         """Create a fresh session from a FEN (default: standard start)."""
         registry: SessionRegistry = app.state.registry
-        fen = body.fen.strip()
-        if fen:
-            try:
-                session = registry.create(fen)
-            except ValueError as err:
-                logger.info("Rejected FEN %r: %s", fen, err)
-                raise HTTPException(
-                    status_code=400, detail=f"Invalid FEN: {err}"
-                ) from err
-        else:
-            session = registry.create(ChessGame().to_fen())
+        fen = (body.fen or "").strip()
+        try:
+            session = registry.create(fen or ChessGame().to_fen())
+        except ValueError as err:
+            logger.info("Rejected FEN %r: %s", fen, err)
+            raise HTTPException(status_code=400, detail=f"Invalid FEN: {err}") from err
+        response.headers["Location"] = f"{API_PREFIX}/sessions/{session.game_id}"
         return {
             "id": session.game_id,
             **serialize_game_state(session.game, session.history),
         }
 
-    @app.get("/api/sessions/{game_id}")
+    @api.get("/sessions/{game_id}", response_model=GameStateModel)
     def get_session_state(game_id: int) -> dict[str, Any]:
         """Full serialized position for one session."""
         registry: SessionRegistry = app.state.registry
@@ -435,25 +549,26 @@ def create_app(
             registry.resync(session)
             return serialize_game_state(session.game, session.history)
 
-    @app.delete("/api/sessions/{game_id}")
-    def delete_session(game_id: int) -> dict[str, Any]:
+    @api.delete("/sessions/{game_id}", status_code=204)
+    def delete_session(game_id: int) -> None:
         """Remove a session row and its moves."""
         registry: SessionRegistry = app.state.registry
         if not registry.delete(game_id):
             raise HTTPException(status_code=404, detail="Session not found")
-        return {"deleted": game_id}
 
     # ------------------------------------------------------------------
     # per-session play
     # ------------------------------------------------------------------
 
-    @app.post("/api/sessions/{game_id}/move")
+    @api.post("/sessions/{game_id}/move", response_model=GameStateModel)
     def move(game_id: int, body: MoveRequest) -> dict[str, Any]:
         """Execute a human move, optionally followed by an engine reply.
 
         The move is applied first and recorded; only then is the engine
         consulted, so a slow or failing engine can never roll back the
-        human's move.  An invalid move raises 400 before any state changes.
+        human's move.  An invalid move raises 400 before any state changes;
+        a finished game raises 409.  When the engine yields no reply the
+        human move still stands and the returned ``turn`` shows it.
         """
         store: GameStore = app.state.store
         registry: SessionRegistry = app.state.registry
@@ -461,26 +576,21 @@ def create_app(
         with session.lock:
             registry.resync(session)
             if session.game.is_draw() or session.game.is_checkmate():
-                raise HTTPException(status_code=400, detail="Game is over")
-            if not body.move.strip():
-                raise HTTPException(status_code=400, detail="No move specified")
+                raise HTTPException(status_code=409, detail="Game is over")
             try:
-                executed = session.game._select_move(body.move)
-                session.game = session.game.after(executed)
+                executed = session.game.select_move(body.move)
+                next_game = session.game.after(executed)
             except ValueError as err:
                 logger.info("Rejected move %r: %s", body.move, err)
                 raise HTTPException(
                     status_code=400, detail=f"Invalid move: {err}"
                 ) from err
 
-            session.history.append(executed)
-            session.history_states.append(session.game)
-            if store is not None:
-                store.append_move(session.game_id, to_uci(executed))
+            _commit(store, session, executed, next_game)
             logger.info("Executed %s; turn now %s", to_uci(executed), session.game.turn)
 
             if body.ai_reply and session.game.legal_moves():
-                ai_move = _engine_move(
+                ai_reply = _engine_move(
                     session.game,
                     session.history,
                     body.depth,
@@ -488,15 +598,11 @@ def create_app(
                     app.state.stockfish_path,
                     engine_config=app.state.engine_config,
                 )
-                if ai_move is not None:
-                    session.game = session.game.after(ai_move)
-                    session.history.append(ai_move)
-                    session.history_states.append(session.game)
-                    if store is not None:
-                        store.append_move(session.game_id, to_uci(ai_move))
+                if ai_reply is not None:
+                    _commit(store, session, ai_reply, session.game.after(ai_reply))
                     logger.info(
                         "AI replied %s; turn now %s",
-                        to_uci(ai_move),
+                        to_uci(ai_reply),
                         session.game.turn,
                     )
                 else:
@@ -504,19 +610,22 @@ def create_app(
 
             return serialize_game_state(session.game, session.history)
 
-    @app.post("/api/sessions/{game_id}/ai_move")
+    @api.post("/sessions/{game_id}/ai-move", response_model=GameStateModel)
     def ai_move(game_id: int, body: AIMoveRequest) -> dict[str, Any]:
-        """Play one engine move for the side to move (no human move involved)."""
+        """Play one engine move for the side to move (no human move involved).
+
+        409 when the game is over; 503 when the engine produced no move.
+        """
         store: GameStore = app.state.store
         registry: SessionRegistry = app.state.registry
         session = require_session(game_id)
         with session.lock:
             registry.resync(session)
             if session.game.is_draw() or session.game.is_checkmate():
-                raise HTTPException(status_code=400, detail="Game is over")
+                raise HTTPException(status_code=409, detail="Game is over")
             if not session.game.legal_moves():
-                raise HTTPException(status_code=400, detail="No legal moves available")
-            ai_move = _engine_move(
+                raise HTTPException(status_code=409, detail="No legal moves available")
+            engine_reply = _engine_move(
                 session.game,
                 session.history,
                 body.depth,
@@ -524,18 +633,16 @@ def create_app(
                 app.state.stockfish_path,
                 engine_config=app.state.engine_config,
             )
-            if ai_move is not None:
-                session.game = session.game.after(ai_move)
-                session.history.append(ai_move)
-                session.history_states.append(session.game)
-                if store is not None:
-                    store.append_move(session.game_id, to_uci(ai_move))
-                logger.info(
-                    "AI move %s; turn now %s", to_uci(ai_move), session.game.turn
-                )
+            if engine_reply is None:
+                logger.warning("Engine returned no move; game state unchanged")
+                raise HTTPException(status_code=503, detail="Engine returned no move")
+            _commit(store, session, engine_reply, session.game.after(engine_reply))
+            logger.info(
+                "AI move %s; turn now %s", to_uci(engine_reply), session.game.turn
+            )
             return serialize_game_state(session.game, session.history)
 
-    @app.post("/api/sessions/{game_id}/undo")
+    @api.post("/sessions/{game_id}/undo", response_model=GameStateModel)
     def undo(game_id: int, body: UndoRequest) -> dict[str, Any]:
         """Roll back ``steps`` half-moves; extra steps are silently ignored
         once the session has unwound to its initial position."""
@@ -544,22 +651,22 @@ def create_app(
         session = require_session(game_id)
         with session.lock:
             registry.resync(session)
-            for _ in range(body.steps):
-                if len(session.history_states) > 1:
-                    session.history_states.pop()
-                    session.history.pop()
+            undone = min(body.steps, len(session.history))
+            if undone:
+                del session.history_states[-undone:]
+                del session.history[-undone:]
             session.game = session.history_states[-1]
             if store is not None:
                 store.truncate_moves(session.game_id, len(session.history))
             logger.info(
                 "Undo %d step(s); history now %d move(s)",
-                body.steps,
+                undone,
                 len(session.history),
             )
             return serialize_game_state(session.game, session.history)
 
-    @app.post("/api/sessions/{game_id}/reset")
-    def reset(game_id: int, body: ResetRequest) -> dict[str, Any]:
+    @api.post("/sessions/{game_id}/reset", response_model=GameStateModel)
+    def reset(game_id: int, body: FenRequest) -> dict[str, Any]:
         """Load a FEN position, or the standard start when the body is empty.
 
         Invalid FENs return 400 and leave the session untouched.
@@ -567,35 +674,26 @@ def create_app(
         store: GameStore = app.state.store
         registry: SessionRegistry = app.state.registry
         session = require_session(game_id)
+        fen = (body.fen or "").strip()
         with session.lock:
             registry.resync(session)
-            if body.fen.strip():
-                try:
-                    session.game = from_fen(body.fen)
-                except ValueError as err:
-                    logger.info("Rejected FEN %r: %s", body.fen, err)
-                    raise HTTPException(
-                        status_code=400, detail=f"Invalid FEN: {err}"
-                    ) from err
-                if store is not None:
-                    store.set_start_fen(session.game_id, session.game.to_fen())
-                logger.info(
-                    "Session %d reset to FEN: %s",
-                    session.game_id,
-                    session.game.to_fen(),
-                )
-            else:
-                session.game = ChessGame()
-                if store is not None:
-                    store.set_start_fen(session.game_id, session.game.to_fen())
-                logger.info(
-                    "Session %d reset to standard start position", session.game_id
-                )
+            try:
+                new_game = from_fen(fen) if fen else ChessGame()
+            except ValueError as err:
+                logger.info("Rejected FEN %r: %s", fen, err)
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid FEN: {err}"
+                ) from err
+            session.game = new_game
             if store is not None:
+                store.set_start_fen(session.game_id, new_game.to_fen())
                 store.truncate_moves(session.game_id, 0)
             session.history = []
-            session.history_states = [session.game]
+            session.history_states = [new_game]
+            logger.info("Session %d reset to %s", session.game_id, new_game.to_fen())
             return serialize_game_state(session.game, session.history)
+
+    app.include_router(api)
 
     return app
 

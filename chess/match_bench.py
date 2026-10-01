@@ -206,7 +206,7 @@ def _make_player(
     def player(game: ChessGame, history: Sequence[Move]) -> Move:
         ply = len(history) + 1
         if ply <= len(scheduled.opening.san_moves):
-            move = game._select_move(scheduled.opening.san_moves[ply - 1])
+            move = game.select_move(scheduled.opening.san_moves[ply - 1])
             ply_records.append(
                 {
                     "ply": ply,
