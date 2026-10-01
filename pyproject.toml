@@ -16,7 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "mypy>=2.3,<3",
-    "pytest>=8,<9",
+    "pytest>=9.1.1,<10",
     "pytest-cov>=5,<8",
     # Ruff's formatter emits invalid Python 2 `except A, B:` syntax for the
     # py314 target from 0.15.0 through 0.16.9 (latest at pin time); 0.14.14
