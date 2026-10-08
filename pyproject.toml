@@ -24,7 +24,7 @@ dev = [
 ]
 
 notebooks = [
-    "ipykernel>=6,<8",
+    "ipykernel>=7.4.0,<8",
     "jupyterlab>=4,<5",
     "nbclient>=0.10,<1",
 ]
